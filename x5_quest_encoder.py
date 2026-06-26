@@ -65,8 +65,8 @@ class EncoderApp:
     def __init__(self, root):
         self.root = root
         root.title(APP_TITLE)
-        root.geometry("820x720")
-        root.minsize(740, 640)
+        root.geometry("820x880")
+        root.minsize(740, 780)
 
         self.proc = None
         self.worker = None
@@ -78,6 +78,16 @@ class EncoderApp:
         self.root.after(100, self._drain_log)
 
     # ---------------------------------------------------------------- UI
+    def _hint(self, parent, text, **grid):
+        """Etichetta-guida grigia sotto un controllo."""
+        lbl = ttk.Label(parent, text=text, foreground="#7a7a7a",
+                        font=("", 10), wraplength=760, justify="left")
+        if grid:
+            lbl.grid(**grid)
+        else:
+            lbl.pack(anchor="w", padx=8, pady=(0, 4))
+        return lbl
+
     def _build_ui(self):
         pad = {"padx": 8, "pady": 4}
 
@@ -85,14 +95,17 @@ class EncoderApp:
         frm_in = ttk.LabelFrame(self.root, text="File sorgente (ProRes / MOV)")
         frm_in.pack(fill="x", **pad)
 
-        self.lst_files = tk.Listbox(frm_in, height=4, selectmode=tk.EXTENDED)
+        row_in = ttk.Frame(frm_in)
+        row_in.pack(fill="x")
+        self.lst_files = tk.Listbox(row_in, height=4, selectmode=tk.EXTENDED)
         self.lst_files.pack(side="left", fill="both", expand=True, padx=6, pady=6)
-
-        btn_col = ttk.Frame(frm_in)
+        btn_col = ttk.Frame(row_in)
         btn_col.pack(side="right", fill="y", padx=6, pady=6)
         ttk.Button(btn_col, text="Aggiungi…", command=self.add_files).pack(fill="x", pady=2)
         ttk.Button(btn_col, text="Rimuovi", command=self.remove_selected).pack(fill="x", pady=2)
         ttk.Button(btn_col, text="Svuota", command=self.clear_files).pack(fill="x", pady=2)
+        self._hint(frm_in, "→ Usa il master ProRes 422 esportato da Premiere, non l'MP4 della camera. "
+                           "L'output esce nella stessa cartella con suffisso _quest.mp4. Più file = batch.")
 
         # --- Encoder ---
         frm_enc = ttk.LabelFrame(self.root, text="Encoder")
@@ -105,48 +118,80 @@ class EncoderApp:
         ttk.Radiobutton(frm_enc, text="Software — libx265 (più bello, più lento)",
                         variable=self.encoder, value="sw",
                         command=self._sync_enc_widgets).grid(row=1, column=0, columnspan=4, sticky="w", padx=6, pady=2)
+        self._hint(frm_enc, "→ Hardware = quando hai fretta, resa 'buona'. Software = resa migliore su "
+                            "fogliame/cieli, ma 15-40 min a clip. In dubbio: parti da Hardware, passa a Software se non basta.",
+                   row=2, column=0, columnspan=4, sticky="w", padx=6)
 
         # preset (solo software)
-        ttk.Label(frm_enc, text="Preset x265:").grid(row=2, column=0, sticky="e", padx=6)
+        ttk.Label(frm_enc, text="Preset x265:").grid(row=3, column=0, sticky="e", padx=6)
         self.preset = tk.StringVar(value="fast")
         self.cmb_preset = ttk.Combobox(frm_enc, textvariable=self.preset, width=10, state="readonly",
                                        values=["ultrafast", "fast", "medium", "slow", "slower"])
-        self.cmb_preset.grid(row=2, column=1, sticky="w", padx=6, pady=2)
+        self.cmb_preset.grid(row=3, column=1, sticky="w", padx=6, pady=2)
 
-        ttk.Label(frm_enc, text="CRF (sw):").grid(row=2, column=2, sticky="e", padx=6)
+        ttk.Label(frm_enc, text="CRF (sw):").grid(row=3, column=2, sticky="e", padx=6)
         self.crf = tk.StringVar(value="16")
         self.spn_crf = ttk.Spinbox(frm_enc, from_=10, to=28, textvariable=self.crf, width=6)
-        self.spn_crf.grid(row=2, column=3, sticky="w", padx=6, pady=2)
+        self.spn_crf.grid(row=3, column=3, sticky="w", padx=6, pady=2)
+        self._hint(frm_enc, "→ Preset: 'fast' ottimo compromesso, 'medium' un filo meglio, 'slower' inutile per il 360 "
+                            "(ore di attesa). CRF: 16 = altissima qualità; più basso (14) = più pesante, più alto (18-20) = più leggero.",
+                   row=4, column=0, columnspan=4, sticky="w", padx=6)
 
         # bitrate (solo hardware)
-        ttk.Label(frm_enc, text="Bitrate hw (Mbps):").grid(row=3, column=0, sticky="e", padx=6)
+        ttk.Label(frm_enc, text="Bitrate hw (Mbps):").grid(row=5, column=0, sticky="e", padx=6)
         self.bitrate = tk.StringVar(value="100")
         self.spn_br = ttk.Spinbox(frm_enc, from_=40, to=250, textvariable=self.bitrate, width=6)
-        self.spn_br.grid(row=3, column=1, sticky="w", padx=6, pady=2)
+        self.spn_br.grid(row=5, column=1, sticky="w", padx=6, pady=2)
+        self._hint(frm_enc, "→ Solo per Hardware. 100 Mbps va bene per paesaggi. Se vedi 'blocchi' su acqua/foglie "
+                            "nel visore, sali a 120-140. Oltre 150 raramente serve e appesantisce solo il file.",
+                   row=6, column=0, columnspan=4, sticky="w", padx=6)
 
         # --- Colore ---
         frm_col = ttk.LabelFrame(self.root, text="Spazio colore (deve combaciare con la sorgente!)")
         frm_col.pack(fill="x", **pad)
+        row_col = ttk.Frame(frm_col)
+        row_col.pack(fill="x")
         self.color = tk.StringVar(value="SDR (BT.709)")
-        ttk.Combobox(frm_col, textvariable=self.color, state="readonly",
+        ttk.Combobox(row_col, textvariable=self.color, state="readonly",
                      values=list(COLOR_TAGS.keys()), width=30).pack(side="left", padx=6, pady=6)
-        ttk.Button(frm_col, text="Rileva dalla sorgente",
+        ttk.Button(row_col, text="Rileva dalla sorgente",
                    command=self.detect_color).pack(side="left", padx=6)
+        self._hint(frm_col, "→ IL PUNTO PIÙ DELICATO. Premi 'Rileva' prima di tutto: se la sorgente è HDR e qui resta "
+                            "BT.709, nel visore i colori escono slavati/sbagliati. SDR per girato sviluppato a Rec.709, "
+                            "PQ per HDR10, HLG per girato HLG. La GUI non converte HDR→SDR (quello si fa in Premiere).")
 
         # --- Metadati 360 ---
         frm_meta = ttk.LabelFrame(self.root, text="Metadati 360")
         frm_meta.pack(fill="x", **pad)
         self.inject_meta = tk.BooleanVar(value=True)
-        ttk.Checkbutton(frm_meta, text="Inietta metadati equirettangolari (mono) dopo l'encoding",
-                        variable=self.inject_meta).grid(row=0, column=0, columnspan=3, sticky="w", padx=6, pady=2)
+        ttk.Checkbutton(frm_meta, text="Inietta metadati equirettangolari dopo l'encoding",
+                        variable=self.inject_meta).grid(row=0, column=0, columnspan=4, sticky="w", padx=6, pady=2)
+
+        ttk.Label(frm_meta, text="Modalità 3D:").grid(row=1, column=0, sticky="e", padx=6)
+        self.stereo = tk.StringVar(value="Mono (2D)")
+        ttk.Combobox(frm_meta, textvariable=self.stereo, state="readonly", width=22,
+                     values=["Mono (2D)",
+                             "Stereo Top-Bottom (TB)",
+                             "Stereo Side-by-Side (SBS)"]).grid(row=1, column=1, sticky="w", padx=6, pady=2)
+        self._hint(frm_meta, "→ Mono per la X5 standard (un solo punto di vista). Top-Bottom / Side-by-Side solo se hai "
+                            "girato/montato in 3D stereoscopico (occhio sx e dx affiancati o sovrapposti nel frame). "
+                            "Sbagliare qui fa vedere doppio o piatto nel visore.",
+                   row=2, column=0, columnspan=4, sticky="w", padx=6)
+
         self.overwrite_meta = tk.BooleanVar(value=True)
         ttk.Checkbutton(frm_meta, text="Sovrascrivi senza creare backup _original",
-                        variable=self.overwrite_meta).grid(row=1, column=0, columnspan=3, sticky="w", padx=6, pady=2)
+                        variable=self.overwrite_meta).grid(row=3, column=0, columnspan=4, sticky="w", padx=6, pady=2)
+        self._hint(frm_meta, "→ Spuntato: niente file di backup (più ordine). Tolto: exiftool tiene una copia "
+                            "_original di sicurezza accanto al file.",
+                   row=4, column=0, columnspan=4, sticky="w", padx=6)
 
         ttk.Button(frm_meta, text="Solo metadati su MP4 esistente…",
-                   command=self.meta_only).grid(row=2, column=0, sticky="w", padx=6, pady=4)
+                   command=self.meta_only).grid(row=5, column=0, sticky="w", padx=6, pady=4)
         ttk.Button(frm_meta, text="Verifica metadati di un file…",
-                   command=self.verify_meta).grid(row=2, column=1, sticky="w", padx=6, pady=4)
+                   command=self.verify_meta).grid(row=5, column=1, sticky="w", padx=6, pady=4)
+        self._hint(frm_meta, "→ 'Solo metadati' inietta su un MP4 già pronto senza ricodificare (usa la Modalità 3D qui sopra). "
+                            "'Verifica' mostra cosa contiene già un file: cerca 'Spherical' e i tag colore.",
+                   row=6, column=0, columnspan=4, sticky="w", padx=6)
 
         # --- Azioni ---
         frm_act = ttk.Frame(self.root)
@@ -269,12 +314,20 @@ class EncoderApp:
         return cmd
 
     def exiftool_cmd(self, path):
+        # XMP-GSpherical:StereoMode -> mono / top-bottom / left-right
+        stereo_map = {
+            "Mono (2D)": "mono",
+            "Stereo Top-Bottom (TB)": "top-bottom",
+            "Stereo Side-by-Side (SBS)": "left-right",
+        }
+        stereo = stereo_map.get(self.stereo.get(), "mono")
         cmd = ["exiftool"]
         if self.overwrite_meta.get():
             cmd.append("-overwrite_original")
         cmd += ['-XMP-GSpherical:Spherical=true',
                 '-XMP-GSpherical:Stitched=true',
                 '-XMP-GSpherical:ProjectionType=equirectangular',
+                f'-XMP-GSpherical:StereoMode={stereo}',
                 path]
         return cmd
 
