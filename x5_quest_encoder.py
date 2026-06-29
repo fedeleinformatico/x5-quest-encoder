@@ -65,8 +65,8 @@ class EncoderApp:
     def __init__(self, root):
         self.root = root
         root.title(APP_TITLE)
-        root.geometry("820x880")
-        root.minsize(740, 780)
+        root.geometry("820x950")
+        root.minsize(1400, 560)
 
         self.proc = None
         self.worker = None
@@ -91,8 +91,20 @@ class EncoderApp:
     def _build_ui(self):
         pad = {"padx": 8, "pady": 4}
 
+        # Layout a due colonne: colonna sinistra per i pannelli, destra per il log (allineato in alto)
+        main_cols = ttk.Frame(self.root)
+        main_cols.pack(fill="both", expand=True)
+        left_col = ttk.Frame(main_cols)
+        right_col = ttk.Frame(main_cols)
+        # Uso grid per mantenere la colonna di destra ancorata in alto indipendentemente
+        # dall'altezza dei controlli a sinistra.
+        left_col.grid(row=0, column=0, sticky="nsew", padx=8, pady=4)
+        right_col.grid(row=0, column=1, sticky="ne", padx=8, pady=4)
+        main_cols.grid_columnconfigure(0, weight=1)
+        main_cols.grid_rowconfigure(0, weight=1)
+
         # --- File input ---
-        frm_in = ttk.LabelFrame(self.root, text="File sorgente (ProRes / MOV)")
+        frm_in = ttk.LabelFrame(left_col, text="File sorgente (ProRes / MOV)")
         frm_in.pack(fill="x", **pad)
 
         row_in = ttk.Frame(frm_in)
@@ -108,46 +120,63 @@ class EncoderApp:
                            "L'output esce nella stessa cartella con suffisso _quest.mp4. Più file = batch.")
 
         # --- Encoder ---
-        frm_enc = ttk.LabelFrame(self.root, text="Encoder")
+        frm_enc = ttk.LabelFrame(left_col, text="Encoder")
         frm_enc.pack(fill="x", **pad)
 
         self.encoder = tk.StringVar(value="hw")
-        ttk.Radiobutton(frm_enc, text="Hardware — hevc_videotoolbox (veloce, ~4 min/clip)",
+        ttk.Radiobutton(frm_enc, text="Hardware HEVC — hevc_videotoolbox (veloce, ~4 min/clip)",
                         variable=self.encoder, value="hw",
                         command=self._sync_enc_widgets).grid(row=0, column=0, columnspan=4, sticky="w", padx=6, pady=2)
-        ttk.Radiobutton(frm_enc, text="Software — libx265 (più bello, più lento)",
+        ttk.Radiobutton(frm_enc, text="Software HEVC — libx265 (più bello, più lento) ★ consigliato",
                         variable=self.encoder, value="sw",
                         command=self._sync_enc_widgets).grid(row=1, column=0, columnspan=4, sticky="w", padx=6, pady=2)
-        self._hint(frm_enc, "→ Hardware = quando hai fretta, resa 'buona'. Software = resa migliore su "
-                            "fogliame/cieli, ma 15-40 min a clip. In dubbio: parti da Hardware, passa a Software se non basta.",
-                   row=2, column=0, columnspan=4, sticky="w", padx=6)
+        ttk.Radiobutton(frm_enc, text="H.264 old-style — h264_videotoolbox (massima compatibilità)",
+                        variable=self.encoder, value="h264",
+                        command=self._sync_enc_widgets).grid(row=2, column=0, columnspan=4, sticky="w", padx=6, pady=2)
+        self._hint(frm_enc, "→ HEVC HW = default: veloce, leggero, decodifica sicura sulla Quest 3. Software = resa migliore "
+                            "su fogliame/cieli ma 15-40 min/clip. H.264 = solo per compatibilità con player/dispositivi "
+                            "vecchi — vedi i limiti nel riquadro H.264 più sotto.",
+                   row=3, column=0, columnspan=4, sticky="w", padx=6)
 
         # preset (solo software)
-        ttk.Label(frm_enc, text="Preset x265:").grid(row=3, column=0, sticky="e", padx=6)
+        ttk.Label(frm_enc, text="Preset x265:").grid(row=4, column=0, sticky="e", padx=6)
         self.preset = tk.StringVar(value="fast")
         self.cmb_preset = ttk.Combobox(frm_enc, textvariable=self.preset, width=10, state="readonly",
                                        values=["ultrafast", "fast", "medium", "slow", "slower"])
-        self.cmb_preset.grid(row=3, column=1, sticky="w", padx=6, pady=2)
+        self.cmb_preset.grid(row=4, column=1, sticky="w", padx=6, pady=2)
 
-        ttk.Label(frm_enc, text="CRF (sw):").grid(row=3, column=2, sticky="e", padx=6)
+        ttk.Label(frm_enc, text="CRF (sw):").grid(row=4, column=2, sticky="e", padx=6)
         self.crf = tk.StringVar(value="16")
         self.spn_crf = ttk.Spinbox(frm_enc, from_=10, to=28, textvariable=self.crf, width=6)
-        self.spn_crf.grid(row=3, column=3, sticky="w", padx=6, pady=2)
+        self.spn_crf.grid(row=4, column=3, sticky="w", padx=6, pady=2)
         self._hint(frm_enc, "→ Preset: 'fast' ottimo compromesso, 'medium' un filo meglio, 'slower' inutile per il 360 "
                             "(ore di attesa). CRF: 16 = altissima qualità; più basso (14) = più pesante, più alto (18-20) = più leggero.",
-                   row=4, column=0, columnspan=4, sticky="w", padx=6)
+                   row=5, column=0, columnspan=4, sticky="w", padx=6)
 
-        # bitrate (solo hardware)
-        ttk.Label(frm_enc, text="Bitrate hw (Mbps):").grid(row=5, column=0, sticky="e", padx=6)
+        # bitrate (hardware HEVC e H264)
+        ttk.Label(frm_enc, text="Bitrate (Mbps):").grid(row=6, column=0, sticky="e", padx=6)
         self.bitrate = tk.StringVar(value="100")
         self.spn_br = ttk.Spinbox(frm_enc, from_=40, to=250, textvariable=self.bitrate, width=6)
-        self.spn_br.grid(row=5, column=1, sticky="w", padx=6, pady=2)
-        self._hint(frm_enc, "→ Solo per Hardware. 100 Mbps va bene per paesaggi. Se vedi 'blocchi' su acqua/foglie "
-                            "nel visore, sali a 120-140. Oltre 150 raramente serve e appesantisce solo il file.",
-                   row=6, column=0, columnspan=4, sticky="w", padx=6)
+        self.spn_br.grid(row=6, column=1, sticky="w", padx=6, pady=2)
+        self._hint(frm_enc, "→ Per HEVC HW: 100 Mbps su paesaggi (120-140 se vedi blocchi su acqua/foglie). "
+                            "Per H.264 old-style: 200 Mbps è il valore classico Quest. Cambiando encoder il valore "
+                            "consigliato si imposta da solo.",
+                   row=7, column=0, columnspan=4, sticky="w", padx=6)
+
+        # --- Riquadro limiti H.264 ---
+        frm_h264 = ttk.LabelFrame(left_col, text="ℹ︎ H.264 old-style — limiti da sapere")
+        frm_h264.pack(fill="x", **pad)
+        self._hint(frm_h264,
+                   "• La Quest 3 decodifica HEVC in hardware fino all'8K, ma per l'H.264 il limite hardware è più basso: "
+                   "il 5.7K60 è al confine e può ricadere in decodifica software → stutter/frame drop nel visore.\n"
+                   "• 200 Mbps è uno spike alto: il buffer della Quest è limitato e i picchi fanno scattare il 360 più del "
+                   "bitrate medio. Qui si usa bufsize ridotto per attenuarlo, ma il file resta pesante.\n"
+                   "• Solo 8-bit SDR: l'H.264 old-style esce a yuv420p. Se la sorgente è HDR, va consegnata in HEVC.\n"
+                   "• Quando usarlo: solo per riprodurre su player datati o dispositivi che NON supportano HEVC. "
+                   "Per la Quest 3/3S, l'HEVC è sempre la scelta migliore (più leggero E più fluido).")
 
         # --- Colore ---
-        frm_col = ttk.LabelFrame(self.root, text="Spazio colore (deve combaciare con la sorgente!)")
+        frm_col = ttk.LabelFrame(left_col, text="Spazio colore (deve combaciare con la sorgente!)")
         frm_col.pack(fill="x", **pad)
         row_col = ttk.Frame(frm_col)
         row_col.pack(fill="x")
@@ -161,7 +190,7 @@ class EncoderApp:
                             "PQ per HDR10, HLG per girato HLG. La GUI non converte HDR→SDR (quello si fa in Premiere).")
 
         # --- Metadati 360 ---
-        frm_meta = ttk.LabelFrame(self.root, text="Metadati 360")
+        frm_meta = ttk.LabelFrame(left_col, text="Metadati 360")
         frm_meta.pack(fill="x", **pad)
         self.inject_meta = tk.BooleanVar(value=True)
         ttk.Checkbutton(frm_meta, text="Inietta metadati equirettangolari dopo l'encoding",
@@ -194,7 +223,7 @@ class EncoderApp:
                    row=6, column=0, columnspan=4, sticky="w", padx=6)
 
         # --- Azioni ---
-        frm_act = ttk.Frame(self.root)
+        frm_act = ttk.Frame(left_col)
         frm_act.pack(fill="x", **pad)
         self.btn_run = ttk.Button(frm_act, text="▶  Avvia", command=self.start)
         self.btn_run.pack(side="left", padx=6)
@@ -207,10 +236,13 @@ class EncoderApp:
         self.lbl_status.pack(side="right", padx=6)
 
         # --- Log ---
-        frm_log = ttk.LabelFrame(self.root, text="Log")
-        frm_log.pack(fill="both", expand=True, **pad)
-        self.txt = tk.Text(frm_log, height=10, wrap="word", state="disabled",
-                           background="#111", foreground="#ddd", insertbackground="#ddd")
+        # Posiziono il log nella colonna di destra, allineato in alto.
+        frm_log = ttk.LabelFrame(right_col, text="Log")
+        # allineo il log in alto: non lo espando verticalmente per non seguirne l'ultimo elemento
+        frm_log.pack(side="top", anchor="n", fill="y", pady=(0, 4))
+        # Testo con larghezza fissa per occupare la colonna di destra
+        self.txt = tk.Text(frm_log, width=60, wrap="word", state="disabled",
+                   background="#111", foreground="#ddd", insertbackground="#ddd")
         self.txt.pack(side="left", fill="both", expand=True, padx=(6, 0), pady=6)
         sb = ttk.Scrollbar(frm_log, command=self.txt.yview)
         sb.pack(side="right", fill="y", pady=6)
@@ -219,10 +251,18 @@ class EncoderApp:
         self._sync_enc_widgets()
 
     def _sync_enc_widgets(self):
-        sw = self.encoder.get() == "sw"
+        enc = self.encoder.get()
+        sw = enc == "sw"
         self.cmb_preset.config(state="readonly" if sw else "disabled")
         self.spn_crf.config(state="normal" if sw else "disabled")
+        # bitrate attivo per HEVC hw e H264, non per software (che usa CRF)
         self.spn_br.config(state="disabled" if sw else "normal")
+        # bitrate consigliato per encoder, solo se l'utente non l'ha "personalizzato"
+        cur = self.bitrate.get().strip()
+        if enc == "h264" and cur in ("", "100"):
+            self.bitrate.set("200")
+        elif enc == "hw" and cur in ("", "200"):
+            self.bitrate.set("100")
 
     # ------------------------------------------------------------- deps
     def _check_deps(self):
@@ -300,17 +340,27 @@ class EncoderApp:
     # --------------------------------------------------- command build
     def build_cmd(self, src, dst):
         cmd = ["ffmpeg", "-y", "-i", src]
-        if self.encoder.get() == "hw":
-            br = self.bitrate.get().strip() or "100"
+        enc = self.encoder.get()
+        br = self.bitrate.get().strip() or "100"
+        if enc == "hw":
             cmd += ["-c:v", "hevc_videotoolbox", "-profile:v", "main10",
                     "-b:v", f"{br}M", "-pix_fmt", "p010le"]
+            tag = "hvc1"
+        elif enc == "h264":
+            # old-style: 8-bit, GOP 1s, bufsize ridotto per limitare gli spike sulla Quest
+            cmd += ["-c:v", "h264_videotoolbox",
+                    "-b:v", f"{br}M", "-maxrate", f"{br}M",
+                    "-bufsize", f"{max(50, int(float(br) / 2))}M",
+                    "-pix_fmt", "yuv420p", "-g", "60"]
+            tag = "avc1"
         else:
             cmd += ["-c:v", "libx265", "-preset", self.preset.get(),
                     "-crf", self.crf.get().strip() or "16",
                     "-pix_fmt", "yuv420p10le",
                     "-x265-params", X265_PARAMS]
+            tag = "hvc1"
         cmd += COLOR_TAGS[self.color.get()]
-        cmd += ["-tag:v", "hvc1", "-c:a", "aac", "-b:a", "320k", dst]
+        cmd += ["-tag:v", tag, "-c:a", "aac", "-b:a", "320k", dst]
         return cmd
 
     def exiftool_cmd(self, path):
