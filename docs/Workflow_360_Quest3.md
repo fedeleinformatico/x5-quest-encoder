@@ -1,8 +1,8 @@
-# Export video 360° da Insta360 X5 → Meta Quest 3 / 3S
+# Export video 360° (Insta360 X5 / Pro 2) → Meta Quest 3 / 3S
 
-Riferimento operativo per il flusso di esportazione di video equirettangolari
-mono 5.7K 60fps verso visore Quest, con montaggio base in Premiere e codifica
-finale via FFmpeg su Mac (Apple Silicon M4).
+Riferimento operativo per esportare video equirettangolari mono verso Quest, con
+montaggio in Premiere e codifica finale via FFmpeg su Mac (Apple Silicon M4).
+Sorgenti coperte: **X5** (5.7K60) e **Insta360 Pro 2** (8K60), entrambe mono.
 
 ---
 
@@ -25,6 +25,24 @@ finale via FFmpeg su Mac (Apple Silicon M4).
 ```
 Premiere (montaggio) → Export ProRes 422 → verifica colore → FFmpeg HEVC → metadati 360
 ```
+
+### Step 0 — Le sorgenti: stitching PRIMA di tutto
+
+I file grezzi delle camere **non** vanno dati a FFmpeg/alla GUI: prima serve lo
+**stitching**, che fa il plugin Insta360 (in Premiere o in Insta360 Studio).
+
+- **Insta360 X5** → file `.insv`: contiene **2 fisheye HEVC 2880×2880** (lenti ant./post.),
+  NON è ancora un 360. Il plugin cuce e riproietta in equirettangolare 5760×2880.
+  Darlo a FFmpeg produrrebbe un singolo fisheye deformato (FFmpeg non ha la
+  calibrazione ottica Insta360).
+- **Insta360 Pro 2** → file `.ins`: è un **manifest di progetto da pochi KB** (4 KB),
+  non il video. Punta ai file originali delle 6 lenti + parametri di stitch. Il plugin
+  Insta360 Pro lo legge e presenta in timeline l'**8K equirettangolare 7680×3840 mono**,
+  già cucito. Anche qui: non si dà l'`.ins` a FFmpeg.
+
+In entrambi i casi l'input della catena è **sempre il ProRes/MP4 già stitchato**,
+mai il file grezzo della camera.
+
 
 ### Step 1 — Premiere: export master ProRes 422
 
@@ -114,10 +132,43 @@ perdere pixel lungo la catena e dare alla Quest un file che decodifica fluido.
   (buffer Quest limitato). HEVC a 100M = più leggero e più sicuro da decodificare.
 - H264 hardware ha senso solo come fallback se l'HEVC hardware non si aggancia.
 
-### Variante 8K30 (alternativa)
-Per scene lente/contemplative, l'**8K30** dell'X5 è percettivamente più nitido
-del 5.7K60 (+33% di risoluzione lineare nel FOV). Il 5.7K60 resta giusto quando
-c'è movimento o si vuole la sensazione di presenza/live.
+### Risoluzione e framerate: cosa regge la Quest 3
+
+La scelta della risoluzione si fa **in export da Premiere** (il ProRes determina la
+risoluzione finale; FFmpeg/GUI non ridimensionano). Regola del decoder Quest 3
+(XR2 Gen 2): l'HEVC arriva sulla carta all'8K, ma **8K30 è il tetto pratico affidabile**.
+
+| Formato        | Nitidezza nel FOV | Fluidità | Decodifica Quest 3        | Quando                          |
+|----------------|-------------------|----------|---------------------------|---------------------------------|
+| 5.7K 60fps     | ~1600 px          | ottima   | sicura                    | movimento, presenza "live" (X5) |
+| 8K 30fps       | ~2130 px          | media    | sicura (tetto pratico)    | scene lente/contemplative       |
+| 8K 60fps       | ~2130 px          | ottima   | **a rischio stutter**     | solo da testare nel visore      |
+
+- **8K60**: da provare, non dare per scontato. Doppio limite: (1) l'encoder hardware
+  potrebbe non agganciarsi a 7680 px (test con `-t 15`); (2) anche se l'export riesce,
+  la decodifica a 8K60 può scattare nel visore proprio nei momenti di movimento.
+  Bitrate: **non 100M, ma 120-150M** (o CRF 18), altrimenti blocking.
+- Se 8K60 scatta → ripiego **8K30** (nitidezza quasi identica) o **5.7K60** (fluidità piena).
+- **Verifica sempre nel headset con la testa in movimento**, non sul monitor del Mac
+  (sul monitor sembra sempre perfetto).
+
+### Perché il ProRes intermedio NON è uno spreco (100 → ~1000 → 100 Mbps)
+
+Sembra un giro a vuoto, ma i tre "100 Mbps" non sono lo stesso contenuto:
+- l'originale è **grezzo/non montato** (X5: 2 fisheye; Pro 2: manifest+lenti);
+- il file finale è **stitchato + montato**.
+La trasformazione pesante (stitch, riproiezione, montaggio) deve materializzarsi da
+qualche parte prima di FFmpeg → è il ProRes. Serve alto e quasi-lossless per **evitare
+la doppia compressione**: se Premiere esportasse HEVC e poi FFmpeg ricomprimesse HEVC,
+il secondo encoder lavorerebbe sugli artefatti del primo (il 360 "si spappola").
+Il ProRes rompe la catena: **una sola** compressione lossy seria, quella finale con i
+parametri buoni. Il bitrate da solo non misura la qualità (100M di ProRes sono scarsi,
+100M di HEVC tunato sono ottimi). Costo reale: solo spazio disco temporaneo (~1 GB/clip),
+che si cancella dopo.
+
+> Nota: la "pipe" Premiere→FFmpeg senza file intermedio **non è applicabile**: Premiere
+> è una GUI, esporta solo su file. La pipe serve a concatenare tool da riga di comando,
+> non a saltare un export da un'app grafica. Vale su Mac e Windows uguale.
 
 ---
 
@@ -239,11 +290,12 @@ non incluso).
 
 ## TL;DR
 
-1. **Premiere → ProRes 422** (standard).
-2. **Verifica colore** sulla sorgente (`grep` bt709 vs bt2020) e imposta i tag giusti.
-3. **FFmpeg → `hevc_videotoolbox` `-b:v 100M` `-profile:v main10` `-tag:v hvc1`** (~4 min/clip);
-   oppure `libx265 -preset fast` se vuoi resa migliore.
-4. **Check/inietta metadati 360** (`grep spherical`, `exiftool` con StereoMode).
-5. **Nel visore**: DeoVR/Pigasus, quality al max, 90Hz, file locale.
-6. HEVC > H264 a 5.7K60 sulla Quest (decodifica più sicura, file più leggero).
-7. Per automatizzare tutto: **`x5_quest_encoder.py`**.
+1. **Stitch nel plugin Insta360** (X5 `.insv` o Pro 2 `.ins`) → mai il grezzo a FFmpeg.
+2. **Premiere → ProRes 422** (standard); la risoluzione di export decide 5.7K/8K.
+3. **Verifica colore** sulla sorgente (`grep` bt709 vs bt2020) e imposta i tag giusti.
+4. **FFmpeg → `hevc_videotoolbox` `-b:v 100M` (`120-150M` per 8K) `-profile:v main10` `-tag:v hvc1`**;
+   oppure `libx265 -preset fast` per resa migliore.
+5. **Check/inietta metadati 360** (`grep spherical`, `exiftool` con StereoMode; Mono per X5 e Pro 2).
+6. **Nel visore**: DeoVR/Pigasus, quality al max, 90Hz, file locale. 8K60 → testa in movimento.
+7. HEVC > H264 sulla Quest (decodifica più sicura, file più leggero).
+8. Per automatizzare tutto: **`x5_quest_encoder.py`**.
