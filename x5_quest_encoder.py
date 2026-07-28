@@ -71,11 +71,13 @@ class EncoderApp:
         self.proc = None
         self.worker = None
         self.log_q = queue.Queue()
+        self.ffmpeg_q = queue.Queue()
         self.cancel_flag = threading.Event()
 
         self._build_ui()
         self._check_deps()
         self.root.after(100, self._drain_log)
+        self.root.after(100, self._drain_ffmpeg)
 
     # ---------------------------------------------------------------- UI
     def _hint(self, parent, text, **grid):
@@ -124,7 +126,7 @@ class EncoderApp:
         frm_enc.pack(fill="x", **pad)
 
         self.encoder = tk.StringVar(value="hw")
-        ttk.Radiobutton(frm_enc, text="Hardware HEVC — hevc_videotoolbox (veloce, ~4 min/clip)",
+        ttk.Radiobutton(frm_enc, text="Hardware HEVC — hevc_videotoolbox (veloce, ~4 min/clip) - limite 4k60",
                         variable=self.encoder, value="hw",
                         command=self._sync_enc_widgets).grid(row=0, column=0, columnspan=4, sticky="w", padx=6, pady=2)
         ttk.Radiobutton(frm_enc, text="Software HEVC — libx265 (più bello, più lento) ★ consigliato",
@@ -236,17 +238,34 @@ class EncoderApp:
         self.lbl_status.pack(side="right", padx=6)
 
         # --- Log ---
-        # Posiziono il log nella colonna di destra, allineato in alto.
+        # Posiziono il log nella colonna di destra; uso un PanedWindow verticale
+        # con il log principale sopra e l'output raw di ffmpeg sotto.
         frm_log = ttk.LabelFrame(right_col, text="Log")
-        # allineo il log in alto: non lo espando verticalmente per non seguirne l'ultimo elemento
-        frm_log.pack(side="top", anchor="n", fill="y", pady=(0, 4))
-        # Testo con larghezza fissa per occupare la colonna di destra
-        self.txt = tk.Text(frm_log, width=60, wrap="word", state="disabled",
-                   background="#111", foreground="#ddd", insertbackground="#ddd")
-        self.txt.pack(side="left", fill="both", expand=True, padx=(6, 0), pady=6)
-        sb = ttk.Scrollbar(frm_log, command=self.txt.yview)
-        sb.pack(side="right", fill="y", pady=6)
+        frm_log.pack(side="top", anchor="n", fill="both", expand=True, pady=(0, 4))
+
+        paned = tk.PanedWindow(frm_log, orient='vertical')
+        paned.pack(fill='both', expand=True, padx=6, pady=6)
+
+        top = ttk.Frame(paned)
+        bottom = ttk.Frame(paned)
+        paned.add(top)
+        paned.add(bottom)
+
+        # Testo principale (log)
+        self.txt = tk.Text(top, width=60, wrap="word", state="disabled",
+               background="#111", foreground="#ddd", insertbackground="#ddd", height=15)
+        self.txt.pack(side="left", fill="both", expand=True)
+        sb = ttk.Scrollbar(top, command=self.txt.yview)
+        sb.pack(side="right", fill="y")
         self.txt.config(yscrollcommand=sb.set)
+
+        # Output raw ffmpeg (sotto il log)
+        self.txt_ffmpeg = tk.Text(bottom, width=60, wrap="none", state="disabled",
+               background="#000", foreground="#0f0", insertbackground="#0f0", height=8)
+        self.txt_ffmpeg.pack(side="left", fill="both", expand=True)
+        sb2 = ttk.Scrollbar(bottom, command=self.txt_ffmpeg.yview)
+        sb2.pack(side="right", fill="y")
+        self.txt_ffmpeg.config(yscrollcommand=sb2.set)
 
         self._sync_enc_widgets()
 
@@ -289,6 +308,18 @@ class EncoderApp:
         except queue.Empty:
             pass
         self.root.after(100, self._drain_log)
+
+    def _drain_ffmpeg(self):
+        try:
+            while True:
+                msg = self.ffmpeg_q.get_nowait()
+                self.txt_ffmpeg.config(state="normal")
+                self.txt_ffmpeg.insert("end", msg)
+                self.txt_ffmpeg.see("end")
+                self.txt_ffmpeg.config(state="disabled")
+        except queue.Empty:
+            pass
+        self.root.after(100, self._drain_ffmpeg)
 
     # ------------------------------------------------------- file mgmt
     def add_files(self):
@@ -414,7 +445,10 @@ class EncoderApp:
     def _encode(self, src, dst):
         dur = ffprobe_duration(src)
         cmd = self.build_cmd(src, dst)
-        self.log("$ " + " ".join(cmd) + "\n")
+        cmd_line = "$ " + " ".join(cmd) + "\n"
+        self.log(cmd_line)
+        # mostra anche il comando nella finestra raw ffmpeg
+        self.ffmpeg_q.put(cmd_line)
         try:
             self.proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
                                          stderr=subprocess.STDOUT, text=True, bufsize=1)
@@ -424,6 +458,11 @@ class EncoderApp:
 
         time_re = re.compile(r"time=(\d+):(\d+):(\d+\.\d+)")
         for line in self.proc.stdout:
+            # inoltra sempre l'output grezzo di ffmpeg alla finestra dedicata
+            try:
+                self.ffmpeg_q.put(line)
+            except Exception:
+                pass
             if self.cancel_flag.is_set():
                 self.proc.terminate()
                 self.log("\n[annullato]\n")
