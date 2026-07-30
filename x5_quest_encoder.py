@@ -14,6 +14,7 @@ Avvio:  python3 x5_quest_encoder.py
 
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import threading
@@ -29,6 +30,17 @@ X265_PARAMS = (
     "psy-rd=2.0:psy-rdoq=1.0:sao=0:rc-lookahead=40:"
     "vbv-maxrate=120000:vbv-bufsize=240000"
 )
+
+# Risoluzioni output (equirettangolari 2:1). None = mantieni originale.
+RESOLUTIONS = {
+    "Originale (nessun ridimensionamento)": None,
+    "8K — 7680×3840 (nitidezza max, 8K60 a rischio stutter)": (7680, 3840),
+    "7K — 6656×3328 (quasi 8K, vicino ai limiti Quest)": (6656, 3328),
+    "6K — 6144×3072 (intermedio, buon compromesso 60fps)": (6144, 3072),
+    "5.7K — 5760×2880 (fluido a 60fps, sicuro sulla Quest)": (5760, 2880),
+    "4K — 3840×1920 (leggerissimo, per test/anteprime)": (3840, 1920),
+    "Personalizzata…": "custom",
+}
 
 # Mappatura tag colore per i tre scenari.
 COLOR_TAGS = {
@@ -61,23 +73,26 @@ def ffprobe_duration(path):
         return None
 
 
+def cmd_to_str(cmd):
+    """Stringa shell copia-incollabile (quota spazi e caratteri speciali)."""
+    return " ".join(shlex.quote(str(a)) for a in cmd)
+
+
 class EncoderApp:
     def __init__(self, root):
         self.root = root
         root.title(APP_TITLE)
-        root.geometry("820x950")
-        root.minsize(1400, 560)
+        root.geometry("820x1100")
+        root.minsize(760, 940)
 
         self.proc = None
         self.worker = None
         self.log_q = queue.Queue()
-        self.ffmpeg_q = queue.Queue()
         self.cancel_flag = threading.Event()
 
         self._build_ui()
         self._check_deps()
         self.root.after(100, self._drain_log)
-        self.root.after(100, self._drain_ffmpeg)
 
     # ---------------------------------------------------------------- UI
     def _hint(self, parent, text, **grid):
@@ -93,20 +108,8 @@ class EncoderApp:
     def _build_ui(self):
         pad = {"padx": 8, "pady": 4}
 
-        # Layout a due colonne: colonna sinistra per i pannelli, destra per il log (allineato in alto)
-        main_cols = ttk.Frame(self.root)
-        main_cols.pack(fill="both", expand=True)
-        left_col = ttk.Frame(main_cols)
-        right_col = ttk.Frame(main_cols)
-        # Uso grid per mantenere la colonna di destra ancorata in alto indipendentemente
-        # dall'altezza dei controlli a sinistra.
-        left_col.grid(row=0, column=0, sticky="nsew", padx=8, pady=4)
-        right_col.grid(row=0, column=1, sticky="ne", padx=8, pady=4)
-        main_cols.grid_columnconfigure(0, weight=1)
-        main_cols.grid_rowconfigure(0, weight=1)
-
         # --- File input ---
-        frm_in = ttk.LabelFrame(left_col, text="File sorgente (ProRes / MOV)")
+        frm_in = ttk.LabelFrame(self.root, text="File sorgente (ProRes / MOV)")
         frm_in.pack(fill="x", **pad)
 
         row_in = ttk.Frame(frm_in)
@@ -122,14 +125,14 @@ class EncoderApp:
                            "L'output esce nella stessa cartella con suffisso _quest.mp4. Più file = batch.")
 
         # --- Encoder ---
-        frm_enc = ttk.LabelFrame(left_col, text="Encoder")
+        frm_enc = ttk.LabelFrame(self.root, text="Encoder")
         frm_enc.pack(fill="x", **pad)
 
         self.encoder = tk.StringVar(value="hw")
-        ttk.Radiobutton(frm_enc, text="Hardware HEVC — hevc_videotoolbox (veloce, ~4 min/clip) - limite 4k60",
+        ttk.Radiobutton(frm_enc, text="Hardware HEVC — hevc_videotoolbox (veloce, ~4 min/clip) ★ consigliato",
                         variable=self.encoder, value="hw",
                         command=self._sync_enc_widgets).grid(row=0, column=0, columnspan=4, sticky="w", padx=6, pady=2)
-        ttk.Radiobutton(frm_enc, text="Software HEVC — libx265 (più bello, più lento) ★ consigliato",
+        ttk.Radiobutton(frm_enc, text="Software HEVC — libx265 (più bello, più lento)",
                         variable=self.encoder, value="sw",
                         command=self._sync_enc_widgets).grid(row=1, column=0, columnspan=4, sticky="w", padx=6, pady=2)
         ttk.Radiobutton(frm_enc, text="H.264 old-style — h264_videotoolbox (massima compatibilità)",
@@ -166,7 +169,7 @@ class EncoderApp:
                    row=7, column=0, columnspan=4, sticky="w", padx=6)
 
         # --- Riquadro limiti H.264 ---
-        frm_h264 = ttk.LabelFrame(left_col, text="ℹ︎ H.264 old-style — limiti da sapere")
+        frm_h264 = ttk.LabelFrame(self.root, text="ℹ︎ H.264 old-style — limiti da sapere")
         frm_h264.pack(fill="x", **pad)
         self._hint(frm_h264,
                    "• La Quest 3 decodifica HEVC in hardware fino all'8K, ma per l'H.264 il limite hardware è più basso: "
@@ -178,7 +181,7 @@ class EncoderApp:
                    "Per la Quest 3/3S, l'HEVC è sempre la scelta migliore (più leggero E più fluido).")
 
         # --- Colore ---
-        frm_col = ttk.LabelFrame(left_col, text="Spazio colore (deve combaciare con la sorgente!)")
+        frm_col = ttk.LabelFrame(self.root, text="Spazio colore (deve combaciare con la sorgente!)")
         frm_col.pack(fill="x", **pad)
         row_col = ttk.Frame(frm_col)
         row_col.pack(fill="x")
@@ -191,8 +194,29 @@ class EncoderApp:
                             "BT.709, nel visore i colori escono slavati/sbagliati. SDR per girato sviluppato a Rec.709, "
                             "PQ per HDR10, HLG per girato HLG. La GUI non converte HDR→SDR (quello si fa in Premiere).")
 
+        # --- Risoluzione output ---
+        frm_res = ttk.LabelFrame(self.root, text="Risoluzione output (ridimensionamento)")
+        frm_res.pack(fill="x", **pad)
+        row_res = ttk.Frame(frm_res)
+        row_res.pack(fill="x")
+        self.resolution = tk.StringVar(value="Originale (nessun ridimensionamento)")
+        ttk.Combobox(row_res, textvariable=self.resolution, state="readonly",
+                     values=list(RESOLUTIONS.keys()), width=48,
+                     ).pack(side="left", padx=6, pady=6)
+        self.resolution.trace_add("write", lambda *a: self._sync_res_widgets())
+        ttk.Label(row_res, text="Larghezza:").pack(side="left", padx=(12, 2))
+        self.custom_w = tk.StringVar(value="6144")
+        self.spn_w = ttk.Spinbox(row_res, from_=1024, to=8192, increment=128,
+                                 textvariable=self.custom_w, width=7, state="disabled")
+        self.spn_w.pack(side="left")
+        ttk.Label(row_res, text="× metà (2:1 automatico)").pack(side="left", padx=(2, 6))
+        self._hint(frm_res, "→ 'Originale' mantiene la risoluzione del ProRes. Usa 5.7K/6K se l'8K60 scatta nelle curve "
+                            "sulla Quest (il decoder scala col numero di pixel: 5.7K≈56%, 6K≈64%, 7K≈75% dell'8K). "
+                            "'Personalizzata' = scrivi la larghezza, l'altezza è sempre la metà (equirettangolare 2:1). "
+                            "Scala lanczos, senza riesportare da Premiere. Puoi solo scendere, non inventare dettaglio.")
+
         # --- Metadati 360 ---
-        frm_meta = ttk.LabelFrame(left_col, text="Metadati 360")
+        frm_meta = ttk.LabelFrame(self.root, text="Metadati 360")
         frm_meta.pack(fill="x", **pad)
         self.inject_meta = tk.BooleanVar(value=True)
         ttk.Checkbutton(frm_meta, text="Inietta metadati equirettangolari dopo l'encoding",
@@ -225,10 +249,12 @@ class EncoderApp:
                    row=6, column=0, columnspan=4, sticky="w", padx=6)
 
         # --- Azioni ---
-        frm_act = ttk.Frame(left_col)
+        frm_act = ttk.Frame(self.root)
         frm_act.pack(fill="x", **pad)
         self.btn_run = ttk.Button(frm_act, text="▶  Avvia", command=self.start)
         self.btn_run.pack(side="left", padx=6)
+        self.btn_preview = ttk.Button(frm_act, text="⌗  Mostra comando", command=self.preview_cmd)
+        self.btn_preview.pack(side="left", padx=6)
         self.btn_cancel = ttk.Button(frm_act, text="■  Annulla", command=self.cancel, state="disabled")
         self.btn_cancel.pack(side="left", padx=6)
 
@@ -238,36 +264,20 @@ class EncoderApp:
         self.lbl_status.pack(side="right", padx=6)
 
         # --- Log ---
-        # Posiziono il log nella colonna di destra; uso un PanedWindow verticale
-        # con il log principale sopra e l'output raw di ffmpeg sotto.
-        frm_log = ttk.LabelFrame(right_col, text="Log")
-        frm_log.pack(side="top", anchor="n", fill="both", expand=True, pady=(0, 4))
-
-        paned = tk.PanedWindow(frm_log, orient='vertical')
-        paned.pack(fill='both', expand=True, padx=6, pady=6)
-
-        top = ttk.Frame(paned)
-        bottom = ttk.Frame(paned)
-        paned.add(top)
-        paned.add(bottom)
-
-        # Testo principale (log)
-        self.txt = tk.Text(top, width=60, wrap="word", state="disabled",
-               background="#111", foreground="#ddd", insertbackground="#ddd", height=15)
-        self.txt.pack(side="left", fill="both", expand=True)
-        sb = ttk.Scrollbar(top, command=self.txt.yview)
-        sb.pack(side="right", fill="y")
+        frm_log = ttk.LabelFrame(self.root, text="Log")
+        frm_log.pack(fill="both", expand=True, **pad)
+        self.txt = tk.Text(frm_log, height=10, wrap="word", state="disabled",
+                           background="#111", foreground="#ddd", insertbackground="#ddd")
+        self.txt.pack(side="left", fill="both", expand=True, padx=(6, 0), pady=6)
+        sb = ttk.Scrollbar(frm_log, command=self.txt.yview)
+        sb.pack(side="right", fill="y", pady=6)
         self.txt.config(yscrollcommand=sb.set)
 
-        # Output raw ffmpeg (sotto il log)
-        self.txt_ffmpeg = tk.Text(bottom, width=60, wrap="none", state="disabled",
-               background="#000", foreground="#0f0", insertbackground="#0f0", height=8)
-        self.txt_ffmpeg.pack(side="left", fill="both", expand=True)
-        sb2 = ttk.Scrollbar(bottom, command=self.txt_ffmpeg.yview)
-        sb2.pack(side="right", fill="y")
-        self.txt_ffmpeg.config(yscrollcommand=sb2.set)
-
         self._sync_enc_widgets()
+
+    def _sync_res_widgets(self):
+        is_custom = RESOLUTIONS.get(self.resolution.get()) == "custom"
+        self.spn_w.config(state="normal" if is_custom else "disabled")
 
     def _sync_enc_widgets(self):
         enc = self.encoder.get()
@@ -308,18 +318,6 @@ class EncoderApp:
         except queue.Empty:
             pass
         self.root.after(100, self._drain_log)
-
-    def _drain_ffmpeg(self):
-        try:
-            while True:
-                msg = self.ffmpeg_q.get_nowait()
-                self.txt_ffmpeg.config(state="normal")
-                self.txt_ffmpeg.insert("end", msg)
-                self.txt_ffmpeg.see("end")
-                self.txt_ffmpeg.config(state="disabled")
-        except queue.Empty:
-            pass
-        self.root.after(100, self._drain_ffmpeg)
 
     # ------------------------------------------------------- file mgmt
     def add_files(self):
@@ -371,6 +369,20 @@ class EncoderApp:
     # --------------------------------------------------- command build
     def build_cmd(self, src, dst):
         cmd = ["ffmpeg", "-y", "-i", src]
+        # ridimensionamento opzionale (scala lanczos, mantiene il 2:1)
+        res = RESOLUTIONS.get(self.resolution.get())
+        if res == "custom":
+            try:
+                w = int(self.custom_w.get())
+                w -= w % 2          # larghezza pari
+                h = w // 2
+                h -= h % 2          # altezza pari
+                res = (w, h)
+            except ValueError:
+                res = None
+        if res and res != "custom":
+            w, h = res
+            cmd += ["-vf", f"scale={w}:{h}:flags=lanczos"]
         enc = self.encoder.get()
         br = self.bitrate.get().strip() or "100"
         if enc == "hw":
@@ -413,6 +425,22 @@ class EncoderApp:
         return cmd
 
     # ----------------------------------------------------------- run
+    def preview_cmd(self):
+        """Mostra i comandi che verrebbero eseguiti, senza avviarli."""
+        files = list(self.lst_files.get(0, "end"))
+        if not files:
+            messagebox.showinfo(APP_TITLE, "Aggiungi almeno un file per vedere il comando.")
+            return
+        self.log("\n========== ANTEPRIMA COMANDI (non eseguiti) ==========\n")
+        for src in files:
+            base, _ = os.path.splitext(src)
+            dst = base + "_quest.mp4"
+            self.log(f"\n# {os.path.basename(src)}\n")
+            self.log(cmd_to_str(self.build_cmd(src, dst)) + "\n")
+            if self.inject_meta.get():
+                self.log(cmd_to_str(self.exiftool_cmd(dst)) + "\n")
+        self.log("======================================================\n")
+
     def start(self):
         files = list(self.lst_files.get(0, "end"))
         if not files:
@@ -445,10 +473,9 @@ class EncoderApp:
     def _encode(self, src, dst):
         dur = ffprobe_duration(src)
         cmd = self.build_cmd(src, dst)
-        cmd_line = "$ " + " ".join(cmd) + "\n"
-        self.log(cmd_line)
-        # mostra anche il comando nella finestra raw ffmpeg
-        self.ffmpeg_q.put(cmd_line)
+        self.log("\n┌─ COMANDO FFMPEG ─────────────────────────────────────────\n")
+        self.log(cmd_to_str(cmd) + "\n")
+        self.log("└──────────────────────────────────────────────────────────\n")
         try:
             self.proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
                                          stderr=subprocess.STDOUT, text=True, bufsize=1)
@@ -458,11 +485,6 @@ class EncoderApp:
 
         time_re = re.compile(r"time=(\d+):(\d+):(\d+\.\d+)")
         for line in self.proc.stdout:
-            # inoltra sempre l'output grezzo di ffmpeg alla finestra dedicata
-            try:
-                self.ffmpeg_q.put(line)
-            except Exception:
-                pass
             if self.cancel_flag.is_set():
                 self.proc.terminate()
                 self.log("\n[annullato]\n")
@@ -492,7 +514,9 @@ class EncoderApp:
             self.log("[metadati] exiftool mancante, salto l'iniezione.\n")
             return
         cmd = self.exiftool_cmd(path)
-        self.log("$ " + " ".join(cmd) + "\n")
+        self.log("\n┌─ COMANDO EXIFTOOL ───────────────────────────────────────\n")
+        self.log(cmd_to_str(cmd) + "\n")
+        self.log("└──────────────────────────────────────────────────────────\n")
         try:
             out = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
             self.log(out.stdout + out.stderr + "\n")
