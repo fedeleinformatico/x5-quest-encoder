@@ -82,8 +82,8 @@ class EncoderApp:
     def __init__(self, root):
         self.root = root
         root.title(APP_TITLE)
-        root.geometry("820x1100")
-        root.minsize(760, 940)
+        root.geometry("840x760")
+        root.minsize(720, 560)
 
         self.proc = None
         self.worker = None
@@ -108,8 +108,50 @@ class EncoderApp:
     def _build_ui(self):
         pad = {"padx": 8, "pady": 4}
 
+        # --- Log (fisso in basso) ---
+        frm_log = ttk.LabelFrame(self.root, text="Log")
+        frm_log.pack(side="bottom", fill="both", expand=False, **pad)
+        self.txt = tk.Text(frm_log, height=9, wrap="word", state="disabled",
+                           background="#111", foreground="#ddd", insertbackground="#ddd")
+        self.txt.pack(side="left", fill="both", expand=True, padx=(6, 0), pady=6)
+        sb = ttk.Scrollbar(frm_log, command=self.txt.yview)
+        sb.pack(side="right", fill="y", pady=6)
+        self.txt.config(yscrollcommand=sb.set)
+
+        # --- Azioni (fisse, sopra il log) ---
+        frm_act = ttk.Frame(self.root)
+        frm_act.pack(side="bottom", fill="x", **pad)
+        self.btn_run = ttk.Button(frm_act, text="▶  Avvia", command=self.start)
+        self.btn_run.pack(side="left", padx=6)
+        self.btn_preview = ttk.Button(frm_act, text="⌗  Mostra comando", command=self.preview_cmd)
+        self.btn_preview.pack(side="left", padx=6)
+        self.btn_cancel = ttk.Button(frm_act, text="■  Annulla", command=self.cancel, state="disabled")
+        self.btn_cancel.pack(side="left", padx=6)
+        self.progress = ttk.Progressbar(frm_act, mode="determinate", maximum=100)
+        self.progress.pack(side="left", fill="x", expand=True, padx=6)
+        self.lbl_status = ttk.Label(frm_act, text="Pronto", width=18)
+        self.lbl_status.pack(side="right", padx=6)
+
+        # --- Area configurazione scrollabile (riempie il resto) ---
+        container = ttk.Frame(self.root)
+        container.pack(side="top", fill="both", expand=True)
+        canvas = tk.Canvas(container, highlightthickness=0)
+        vsb = ttk.Scrollbar(container, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=vsb.set)
+        vsb.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+        self.body = ttk.Frame(canvas)
+        body_id = canvas.create_window((0, 0), window=self.body, anchor="nw")
+        canvas.bind("<Configure>", lambda e: canvas.itemconfigure(body_id, width=e.width))
+        self.body.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        # rotella del mouse attiva solo quando il puntatore è sull'area di configurazione
+        def _wheel(e):
+            canvas.yview_scroll(-1 if e.delta > 0 else 1, "units")
+        canvas.bind("<Enter>", lambda e: canvas.bind_all("<MouseWheel>", _wheel))
+        canvas.bind("<Leave>", lambda e: canvas.unbind_all("<MouseWheel>"))
+
         # --- File input ---
-        frm_in = ttk.LabelFrame(self.root, text="File sorgente (ProRes / MOV)")
+        frm_in = ttk.LabelFrame(self.body, text="File sorgente (ProRes / MOV)")
         frm_in.pack(fill="x", **pad)
 
         row_in = ttk.Frame(frm_in)
@@ -125,7 +167,7 @@ class EncoderApp:
                            "L'output esce nella stessa cartella con suffisso _quest.mp4. Più file = batch.")
 
         # --- Encoder ---
-        frm_enc = ttk.LabelFrame(self.root, text="Encoder")
+        frm_enc = ttk.LabelFrame(self.body, text="Encoder")
         frm_enc.pack(fill="x", **pad)
 
         self.encoder = tk.StringVar(value="hw")
@@ -169,7 +211,7 @@ class EncoderApp:
                    row=7, column=0, columnspan=4, sticky="w", padx=6)
 
         # --- Riquadro limiti H.264 ---
-        frm_h264 = ttk.LabelFrame(self.root, text="ℹ︎ H.264 old-style — limiti da sapere")
+        frm_h264 = ttk.LabelFrame(self.body, text="ℹ︎ H.264 old-style — limiti da sapere")
         frm_h264.pack(fill="x", **pad)
         self._hint(frm_h264,
                    "• La Quest 3 decodifica HEVC in hardware fino all'8K, ma per l'H.264 il limite hardware è più basso: "
@@ -181,7 +223,7 @@ class EncoderApp:
                    "Per la Quest 3/3S, l'HEVC è sempre la scelta migliore (più leggero E più fluido).")
 
         # --- Colore ---
-        frm_col = ttk.LabelFrame(self.root, text="Spazio colore (deve combaciare con la sorgente!)")
+        frm_col = ttk.LabelFrame(self.body, text="Spazio colore (deve combaciare con la sorgente!)")
         frm_col.pack(fill="x", **pad)
         row_col = ttk.Frame(frm_col)
         row_col.pack(fill="x")
@@ -195,7 +237,7 @@ class EncoderApp:
                             "PQ per HDR10, HLG per girato HLG. La GUI non converte HDR→SDR (quello si fa in Premiere).")
 
         # --- Risoluzione output ---
-        frm_res = ttk.LabelFrame(self.root, text="Risoluzione output (ridimensionamento)")
+        frm_res = ttk.LabelFrame(self.body, text="Risoluzione output (ridimensionamento)")
         frm_res.pack(fill="x", **pad)
         row_res = ttk.Frame(frm_res)
         row_res.pack(fill="x")
@@ -216,7 +258,7 @@ class EncoderApp:
                             "Scala lanczos, senza riesportare da Premiere. Puoi solo scendere, non inventare dettaglio.")
 
         # --- Metadati 360 ---
-        frm_meta = ttk.LabelFrame(self.root, text="Metadati 360")
+        frm_meta = ttk.LabelFrame(self.body, text="Metadati 360")
         frm_meta.pack(fill="x", **pad)
         self.inject_meta = tk.BooleanVar(value=True)
         ttk.Checkbutton(frm_meta, text="Inietta metadati equirettangolari dopo l'encoding",
@@ -247,31 +289,6 @@ class EncoderApp:
         self._hint(frm_meta, "→ 'Solo metadati' inietta su un MP4 già pronto senza ricodificare (usa la Modalità 3D qui sopra). "
                             "'Verifica' mostra cosa contiene già un file: cerca 'Spherical' e i tag colore.",
                    row=6, column=0, columnspan=4, sticky="w", padx=6)
-
-        # --- Azioni ---
-        frm_act = ttk.Frame(self.root)
-        frm_act.pack(fill="x", **pad)
-        self.btn_run = ttk.Button(frm_act, text="▶  Avvia", command=self.start)
-        self.btn_run.pack(side="left", padx=6)
-        self.btn_preview = ttk.Button(frm_act, text="⌗  Mostra comando", command=self.preview_cmd)
-        self.btn_preview.pack(side="left", padx=6)
-        self.btn_cancel = ttk.Button(frm_act, text="■  Annulla", command=self.cancel, state="disabled")
-        self.btn_cancel.pack(side="left", padx=6)
-
-        self.progress = ttk.Progressbar(frm_act, mode="determinate", maximum=100)
-        self.progress.pack(side="left", fill="x", expand=True, padx=6)
-        self.lbl_status = ttk.Label(frm_act, text="Pronto", width=18)
-        self.lbl_status.pack(side="right", padx=6)
-
-        # --- Log ---
-        frm_log = ttk.LabelFrame(self.root, text="Log")
-        frm_log.pack(fill="both", expand=True, **pad)
-        self.txt = tk.Text(frm_log, height=10, wrap="word", state="disabled",
-                           background="#111", foreground="#ddd", insertbackground="#ddd")
-        self.txt.pack(side="left", fill="both", expand=True, padx=(6, 0), pady=6)
-        sb = ttk.Scrollbar(frm_log, command=self.txt.yview)
-        sb.pack(side="right", fill="y", pady=6)
-        self.txt.config(yscrollcommand=sb.set)
 
         self._sync_enc_widgets()
 
