@@ -55,6 +55,17 @@ COLOR_TAGS = {
                           "-colorspace", "bt2020nc"],
 }
 
+# Gestione traccia audio.
+AUDIO_MODES = {
+    "AAC stereo 320 kbps (default)": "stereo",
+    "AAC multicanale 512 kbps (mantiene i canali)": "multi",
+    "Nessun audio": "none",
+}
+
+# ExifTool deve poter scrivere oltre i 4 GB: senza questo, su un MP4 grande
+# fallisce con "End of processing at large atom (LargeFileSupport not enabled)".
+EXIFTOOL_BASE = ["exiftool", "-api", "LargeFileSupport=1"]
+
 
 def which(cmd):
     return shutil.which(cmd)
@@ -78,11 +89,15 @@ def cmd_to_str(cmd):
     return " ".join(shlex.quote(str(a)) for a in cmd)
 
 
+def human_gb(n):
+    return f"{n / 1e9:.1f} GB"
+
+
 class EncoderApp:
     def __init__(self, root):
         self.root = root
         root.title(APP_TITLE)
-        root.geometry("840x760")
+        root.geometry("860x780")
         root.minsize(720, 560)
 
         self.proc = None
@@ -98,7 +113,7 @@ class EncoderApp:
     def _hint(self, parent, text, **grid):
         """Etichetta-guida grigia sotto un controllo."""
         lbl = ttk.Label(parent, text=text, foreground="#7a7a7a",
-                        font=("", 10), wraplength=760, justify="left")
+                        font=("", 10), wraplength=780, justify="left")
         if grid:
             lbl.grid(**grid)
         else:
@@ -144,6 +159,7 @@ class EncoderApp:
         body_id = canvas.create_window((0, 0), window=self.body, anchor="nw")
         canvas.bind("<Configure>", lambda e: canvas.itemconfigure(body_id, width=e.width))
         self.body.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+
         # rotella del mouse attiva solo quando il puntatore è sull'area di configurazione
         def _wheel(e):
             canvas.yview_scroll(-1 if e.delta > 0 else 1, "units")
@@ -257,6 +273,17 @@ class EncoderApp:
                             "'Personalizzata' = scrivi la larghezza, l'altezza è sempre la metà (equirettangolare 2:1). "
                             "Scala lanczos, senza riesportare da Premiere. Puoi solo scendere, non inventare dettaglio.")
 
+        # --- Audio ---
+        frm_aud = ttk.LabelFrame(self.body, text="Audio")
+        frm_aud.pack(fill="x", **pad)
+        self.audio = tk.StringVar(value="AAC stereo 320 kbps (default)")
+        ttk.Combobox(frm_aud, textvariable=self.audio, state="readonly",
+                     values=list(AUDIO_MODES.keys()), width=46).pack(side="left", padx=6, pady=6)
+        self._hint(frm_aud, "→ Stereo va bene per il 99% dei casi. 'Multicanale' se il master ha audio spaziale a 4 canali "
+                            "e non vuoi il downmix — attenzione: i metadati ambisonici (SA3D) NON vengono scritti da "
+                            "exiftool, per quelli serve il tool spatial-media di Google. Se la sorgente non ha audio, "
+                            "la traccia viene semplicemente saltata.")
+
         # --- Metadati 360 ---
         frm_meta = ttk.LabelFrame(self.body, text="Metadati 360")
         frm_meta.pack(fill="x", **pad)
@@ -271,26 +298,29 @@ class EncoderApp:
                              "Stereo Top-Bottom (TB)",
                              "Stereo Side-by-Side (SBS)"]).grid(row=1, column=1, sticky="w", padx=6, pady=2)
         self._hint(frm_meta, "→ Mono per la X5 standard (un solo punto di vista). Top-Bottom / Side-by-Side solo se hai "
-                            "girato/montato in 3D stereoscopico (occhio sx e dx affiancati o sovrapposti nel frame). "
-                            "Sbagliare qui fa vedere doppio o piatto nel visore.",
+                             "girato/montato in 3D stereoscopico (occhio sx e dx affiancati o sovrapposti nel frame). "
+                             "Sbagliare qui fa vedere doppio o piatto nel visore.",
                    row=2, column=0, columnspan=4, sticky="w", padx=6)
 
         self.overwrite_meta = tk.BooleanVar(value=True)
         ttk.Checkbutton(frm_meta, text="Sovrascrivi senza creare backup _original",
                         variable=self.overwrite_meta).grid(row=3, column=0, columnspan=4, sticky="w", padx=6, pady=2)
         self._hint(frm_meta, "→ Spuntato: niente file di backup (più ordine). Tolto: exiftool tiene una copia "
-                            "_original di sicurezza accanto al file.",
+                             "_original di sicurezza accanto al file — che su un 360 significa raddoppiare i GB.",
                    row=4, column=0, columnspan=4, sticky="w", padx=6)
 
         ttk.Button(frm_meta, text="Solo metadati su MP4 esistente…",
                    command=self.meta_only).grid(row=5, column=0, sticky="w", padx=6, pady=4)
         ttk.Button(frm_meta, text="Verifica metadati di un file…",
                    command=self.verify_meta).grid(row=5, column=1, sticky="w", padx=6, pady=4)
-        self._hint(frm_meta, "→ 'Solo metadati' inietta su un MP4 già pronto senza ricodificare (usa la Modalità 3D qui sopra). "
-                            "'Verifica' mostra cosa contiene già un file: cerca 'Spherical' e i tag colore.",
+        self._hint(frm_meta, "→ 'Solo metadati' inietta su un MP4 già pronto senza ricodificare (usa la Modalità 3D qui sopra): "
+                             "è la strada giusta per recuperare un encode finito male. ExifTool riscrive l'INTERO file, "
+                             "quindi su un 360 da 10 GB servono minuti e altrettanti GB liberi sul disco: la GUI li controlla "
+                             "prima di partire. 'Verifica' rilegge Spherical, colore e codec tag del file.",
                    row=6, column=0, columnspan=4, sticky="w", padx=6)
 
         self._sync_enc_widgets()
+        self._sync_res_widgets()
 
     def _sync_res_widgets(self):
         is_custom = RESOLUTIONS.get(self.resolution.get()) == "custom"
@@ -384,22 +414,32 @@ class EncoderApp:
         messagebox.showinfo(APP_TITLE, f"Rilevato: {guess}\nImpostazione colore aggiornata.")
 
     # --------------------------------------------------- command build
-    def build_cmd(self, src, dst):
-        cmd = ["ffmpeg", "-y", "-i", src]
-        # ridimensionamento opzionale (scala lanczos, mantiene il 2:1)
+    def _target_res(self):
+        """(w, h) di destinazione, oppure None se nessun ridimensionamento."""
         res = RESOLUTIONS.get(self.resolution.get())
         if res == "custom":
             try:
                 w = int(self.custom_w.get())
-                w -= w % 2          # larghezza pari
-                h = w // 2
-                h -= h % 2          # altezza pari
-                res = (w, h)
             except ValueError:
-                res = None
-        if res and res != "custom":
+                return None
+            w -= w % 2          # larghezza pari
+            h = w // 2
+            h -= h % 2          # altezza pari
+            return (w, h)
+        return res
+
+    def build_cmd(self, src, dst):
+        cmd = ["ffmpeg", "-y", "-i", src]
+
+        # solo prima traccia video + prima traccia audio se esiste
+        cmd += ["-map", "0:v:0", "-map", "0:a:0?"]
+
+        # ridimensionamento opzionale (scala lanczos, mantiene il 2:1)
+        res = self._target_res()
+        if res:
             w, h = res
             cmd += ["-vf", f"scale={w}:{h}:flags=lanczos"]
+
         enc = self.encoder.get()
         br = self.bitrate.get().strip() or "100"
         if enc == "hw":
@@ -419,8 +459,20 @@ class EncoderApp:
                     "-pix_fmt", "yuv420p10le",
                     "-x265-params", X265_PARAMS]
             tag = "hvc1"
+
         cmd += COLOR_TAGS[self.color.get()]
-        cmd += ["-tag:v", tag, "-c:a", "aac", "-b:a", "320k", dst]
+        cmd += ["-tag:v", tag]
+
+        # audio
+        mode = AUDIO_MODES.get(self.audio.get(), "stereo")
+        if mode == "none":
+            cmd += ["-an"]
+        elif mode == "multi":
+            cmd += ["-c:a", "aac", "-b:a", "512k"]
+        else:
+            cmd += ["-c:a", "aac", "-b:a", "320k", "-ac", "2"]
+
+        cmd += ["-movflags", "+faststart", dst]
         return cmd
 
     def exiftool_cmd(self, path):
@@ -431,7 +483,7 @@ class EncoderApp:
             "Stereo Side-by-Side (SBS)": "left-right",
         }
         stereo = stereo_map.get(self.stereo.get(), "mono")
-        cmd = ["exiftool"]
+        cmd = list(EXIFTOOL_BASE)
         if self.overwrite_meta.get():
             cmd.append("-overwrite_original")
         cmd += ['-XMP-GSpherical:Spherical=true',
@@ -440,6 +492,14 @@ class EncoderApp:
                 f'-XMP-GSpherical:StereoMode={stereo}',
                 path]
         return cmd
+
+    def verify_cmd(self, path):
+        return list(EXIFTOOL_BASE) + [
+            "-XMP-GSpherical:all",
+            "-CompressorID", "-VideoFrameRate", "-ImageSize",
+            "-ColorPrimaries", "-TransferCharacteristics", "-MatrixCoefficients",
+            "-AudioChannels", "-FileSize", "-Duration",
+            path]
 
     # ----------------------------------------------------------- run
     def preview_cmd(self):
@@ -481,7 +541,7 @@ class EncoderApp:
             self.log(f"\n=== [{idx}/{len(files)}] {os.path.basename(src)} ===\n")
             self._set_status(f"Encoding {idx}/{len(files)}")
             ok = self._encode(src, dst)
-            if ok and self.inject_meta.get():
+            if ok and self.inject_meta.get() and not self.cancel_flag.is_set():
                 self._inject(dst)
         self._set_status("Pronto")
         self._reset_buttons()
@@ -520,25 +580,71 @@ class EncoderApp:
         rc = self.proc.returncode
         self.proc = None
         self._set_progress(100)
-        if rc == 0:
-            self.log(f"[OK] {dst}\n")
+        if rc == 0 and os.path.exists(dst) and os.path.getsize(dst) > 0:
+            self.log(f"[OK] {dst}  ({human_gb(os.path.getsize(dst))})\n")
             return True
         self.log(f"[FFmpeg uscito con codice {rc}]\n")
         return False
 
+    # ------------------------------------------------------- metadati
     def _inject(self, path):
+        """Iniezione metadati 360. ExifTool riscrive l'intero file: niente timeout,
+        controllo preventivo dello spazio libero, LargeFileSupport sempre attivo."""
         if not which("exiftool"):
             self.log("[metadati] exiftool mancante, salto l'iniezione.\n")
-            return
+            return False
+        if not os.path.exists(path):
+            self.log(f"[metadati] file non trovato: {path}\n")
+            return False
+
+        size = os.path.getsize(path)
+        folder = os.path.dirname(os.path.abspath(path)) or "."
+        try:
+            free = shutil.disk_usage(folder).free
+        except Exception:
+            free = None
+        # exiftool scrive un temporaneo delle stesse dimensioni; senza backup
+        # serve ~1x il file, con backup ~2x.
+        needed = size * (1.1 if self.overwrite_meta.get() else 2.1)
+        if free is not None and free < needed:
+            self.log(f"[ERRORE metadati] spazio insufficiente su {folder}: "
+                     f"servono ~{human_gb(needed)}, disponibili {human_gb(free)}.\n"
+                     f"           Libera spazio oppure sposta il file su un altro disco.\n")
+            return False
+
         cmd = self.exiftool_cmd(path)
         self.log("\n┌─ COMANDO EXIFTOOL ───────────────────────────────────────\n")
         self.log(cmd_to_str(cmd) + "\n")
         self.log("└──────────────────────────────────────────────────────────\n")
+        self.log(f"[metadati] riscrittura di {human_gb(size)} — può richiedere diversi minuti, "
+                 f"non chiudere la finestra.\n")
+        self._set_status("Metadati…")
+        self._set_indeterminate(True)
+
         try:
-            out = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-            self.log(out.stdout + out.stderr + "\n")
+            self.proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                                         stderr=subprocess.STDOUT, text=True, bufsize=1)
+            for line in self.proc.stdout:
+                if self.cancel_flag.is_set():
+                    self.proc.terminate()
+                    self.log("\n[metadati annullati — il file potrebbe essere incompleto]\n")
+                    return False
+                self.log(line)
+            self.proc.wait()
+            rc = self.proc.returncode
         except Exception as e:
             self.log(f"[ERRORE metadati] {e}\n")
+            return False
+        finally:
+            self.proc = None
+            self._set_indeterminate(False)
+            self._set_status("Pronto")
+
+        if rc == 0:
+            self.log("[metadati OK]\n")
+            return True
+        self.log(f"[ERRORE metadati] exiftool uscito con codice {rc}\n")
+        return False
 
     # --------------------------------------------------- meta-only ops
     def meta_only(self):
@@ -550,7 +656,15 @@ class EncoderApp:
         if not which("exiftool"):
             messagebox.showerror(APP_TITLE, "exiftool non trovato. brew install exiftool")
             return
-        threading.Thread(target=self._inject, args=(path,), daemon=True).start()
+        self.cancel_flag.clear()
+        self.btn_run.config(state="disabled")
+        self.btn_cancel.config(state="normal")
+
+        def _do():
+            self._inject(path)
+            self._reset_buttons()
+
+        threading.Thread(target=_do, daemon=True).start()
 
     def verify_meta(self):
         path = filedialog.askopenfilename(
@@ -558,19 +672,25 @@ class EncoderApp:
             filetypes=[("Video", "*.mp4 *.mov"), ("Tutti", "*.*")])
         if not path:
             return
+        if not which("exiftool"):
+            messagebox.showerror(APP_TITLE, "exiftool non trovato. brew install exiftool")
+            return
 
         def _do():
             try:
-                out = subprocess.run(["ffmpeg", "-i", path],
-                                     capture_output=True, text=True, timeout=30)
-                blob = out.stderr
+                out = subprocess.run(self.verify_cmd(path),
+                                     capture_output=True, text=True, timeout=180)
+                blob = (out.stdout + out.stderr).strip()
             except Exception as e:
                 self.log(f"[verifica] errore: {e}\n")
                 return
-            found = [l for l in blob.splitlines()
-                     if re.search(r"spherical|projection|color|transfer|primaries", l, re.I)]
             self.log(f"\n[verifica] {os.path.basename(path)}\n")
-            self.log(("\n".join(found) if found else "Nessun metadato 360 / colore trovato.") + "\n")
+            self.log((blob if blob else "Nessun metadato trovato.") + "\n")
+            if "Spherical" not in blob:
+                self.log("→ ATTENZIONE: nessun tag Spherical. Il file verrà visto come video piatto. "
+                         "Usa 'Solo metadati su MP4 esistente…'.\n")
+            if "hvc1" not in blob and "avc1" not in blob:
+                self.log("→ NOTA: codec tag inatteso. Per la Quest l'HEVC deve essere 'hvc1', non 'hev1'.\n")
 
         threading.Thread(target=_do, daemon=True).start()
 
@@ -586,6 +706,16 @@ class EncoderApp:
 
     def _set_progress(self, v):
         self.root.after(0, lambda: self.progress.config(value=v))
+
+    def _set_indeterminate(self, on):
+        def _apply():
+            if on:
+                self.progress.config(mode="indeterminate")
+                self.progress.start(12)
+            else:
+                self.progress.stop()
+                self.progress.config(mode="determinate", value=0)
+        self.root.after(0, _apply)
 
     def _set_status(self, s):
         self.root.after(0, lambda: self.lbl_status.config(text=s))
