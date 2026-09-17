@@ -27,9 +27,11 @@ Homebrew con `brew install python-tk`).
 
 - **Batch** di file ProRes/MOV → `<nome>_quest.mp4`, anche su un disco diverso.
 - **Tre encoder**: HEVC hardware VideoToolbox (default, 120 Mbps), HEVC software
-  libx265 con parametri tarati per fascia di risoluzione, H.264 per compatibilità.
+  libx265 con parametri tarati per fascia di risoluzione, H.264 per compatibilità
+  (VideoToolbox fino a 4096 px, libx264 oltre).
 - **Ridimensionamento** lanczos con i preset nativi (8K, 6K 6016×3008, 5.7K) —
-  solo verso il basso, l'upscale viene bloccato.
+  solo verso il basso, l'upscale viene bloccato. Supporta anche lo stereo
+  top-bottom (1:1, es. Pro 2 3D) e side-by-side.
 - **Rilevamento colore** dalla sorgente (SDR BT.709 / HDR10 PQ / HLG).
 - **Metadati 360** (mono, top-bottom, side-by-side) con `LargeFileSupport` per i
   file oltre i 4 GB, più "solo metadati" e "verifica" su MP4 esistenti.
@@ -47,9 +49,10 @@ Quest, spazio colore, Dolby Vision della X6) e contiene i comandi da usare a man
 
 In breve:
 
-1. Stitch nel plugin Insta360 — mai dare `.insv` / `.ins` a FFmpeg.
+1. Stitch con i tool Insta360 (plugin/Studio, Stitcher per la Pro 2) — mai dare
+   il materiale grezzo a FFmpeg.
 2. Premiere → **ProRes 422** alla risoluzione nativa.
-3. **6K60** per il movimento, **8K30** per la nitidezza. Mai upscale.
+3. **6K60** (5.7K60 sulla X5) per il movimento, **8K30** per la nitidezza. Mai upscale.
 4. Verifica il colore della sorgente.
 5. HEVC `-tag:v hvc1`, metadati con `exiftool -api LargeFileSupport=1`.
 6. Prova nel visore (DeoVR / Pigasus), con la testa in movimento.
@@ -62,6 +65,17 @@ nella storia git:
 ```bash
 git log --oneline -- x5_quest_encoder.py
 ```
+
+## Verifiche
+
+Comandi e limiti tecnici della guida sono stati provati su Mac M4 con FFmpeg 8.1,
+x265 4.2 ed exiftool 12.85; le specifiche delle camere vengono dalle pagine
+Insta360. Le soglie di "regge / non regge" nel visore restano da confermare con
+le proprie clip.
+
+## Licenza
+
+[MIT](LICENSE).
 
 ## Limiti
 

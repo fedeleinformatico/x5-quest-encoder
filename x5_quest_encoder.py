@@ -37,13 +37,13 @@ X265_PARAMS_STD = (
     "psy-rd=2.0:psy-rdoq=1.0:sao=0:rc-lookahead=40:"
     "vbv-maxrate=120000:vbv-bufsize=240000"
 )
-# Fascia alta: 7K60, 8K50, 8K60 (sopra ~1300 Mpx/s). high-tier=1 è necessario:
-# senza, il Level 6.1 Main tier riporta il VBV a 120 Mbps.
+# Fascia alta: 7K60, 8K50, 8K60 (sopra ~1300 Mpx/s). Il level non va forzato:
+# x265 sceglie da solo Level 6.1 High tier per l'8K60 a 160 Mbps, mentre
+# level-idc=6.1 rifiuta i frame più grandi (Pro 2 3D TB 7680×7680).
 X265_PARAMS_HIGH = (
     "keyint=60:min-keyint=60:bframes=4:aq-mode=3:"
     "psy-rd=1.5:psy-rdoq=1.0:sao=0:rc-lookahead=25:"
-    "vbv-maxrate=160000:vbv-bufsize=320000:"
-    "level-idc=6.1:high-tier=1"
+    "vbv-maxrate=160000:vbv-bufsize=320000"
 )
 # Soglia tra le due fasce, in pixel codificati al secondo.
 X265_HIGH_THRESHOLD = 1_200_000_000
@@ -52,15 +52,28 @@ X265_HIGH_THRESHOLD = 1_200_000_000
 # massima dell'output in modalità CRF.
 X265_VBV_MAXRATE_MBPS = {"std": 120, "high": 160}
 
+# h264_videotoolbox non apre l'encoder oltre 4096 px per lato (verificato su
+# Apple Silicon): sopra si passa a libx264.
+H264_VT_MAX_SIDE = 4096
+
+# Rapporto larghezza/altezza del frame per modalità 3D: equirettangolare mono
+# 2:1, stereo top-bottom 1:1 (es. Pro 2 8K 3D 7680×7680), side-by-side 4:1.
+STEREO_ASPECT = {
+    "Mono (2D)": 2,
+    "Stereo Top-Bottom (TB)": 1,
+    "Stereo Side-by-Side (SBS)": 4,
+}
+
 # Bitrate consigliati (Mbps) per gli encoder a bitrate fisso.
 DEFAULT_BITRATE = {"hw": "120", "h264": "200"}
 
-# Risoluzioni output (equirettangolari 2:1). None = mantieni originale.
+# Risoluzioni output: larghezze dei preset, l'altezza dipende dalla modalità 3D
+# (le etichette mostrano il caso mono 2:1). None = mantieni originale.
 # Si può solo scendere: se il target non è più piccolo del sorgente, lo
 # scaling viene saltato (vedi _scale_plan).
 RESOLUTIONS = {
     "Originale (nessun ridimensionamento)": None,
-    "8K — 7680×3840 (nativo X6 / Pro 2 · 8K30 = qualità max)": (7680, 3840),
+    "8K — 7680×3840 (nativo X5 / X6 / Pro 2 · 8K30 = qualità max)": (7680, 3840),
     "7K — 6656×3328 (a 60fps pochi bit per pixel)": (6656, 3328),
     "6K — 6016×3008 (nativo X6 · 6K60 per il movimento)": (6016, 3008),
     "5.7K — 5760×2880 (nativo X5)": (5760, 2880),
@@ -312,7 +325,7 @@ class EncoderApp:
         self._hint(frm_enc, "→ Preset: 'fast' ottimo compromesso, 'medium' un filo meglio, 'slower' inutile per il 360 "
                             "(ore di attesa). CRF: 16 = altissima qualità; più basso (14) = più pesante, più alto (18-20) = più leggero. "
                             "I parametri x265 si scelgono da soli in base al carico: fino a 6K60/8K30 tetto VBV 120 Mbps, "
-                            "7K60/8K50/8K60 tetto 160 Mbps (high tier). "
+                            "7K60/8K50/8K60 tetto 160 Mbps. "
                             "In CRF la dimensione finale non è prevedibile: la stima usa il tetto VBV, quindi è prudenziale.",
                    row=5, column=0, columnspan=4, sticky="w", padx=6)
 
@@ -334,6 +347,9 @@ class EncoderApp:
                    "il 5.7K60 è al confine e può ricadere in decodifica software → stutter/frame drop nel visore.\n"
                    "• 200 Mbps è uno spike alto: il buffer della Quest è limitato e i picchi fanno scattare il 360 più del "
                    "bitrate medio. Qui si usa bufsize ridotto per attenuarlo, ma il file resta pesante.\n"
+                   "• Sopra 4096 px per lato l'encoder hardware H.264 del Mac non parte: la GUI passa da sola a "
+                   "libx264 (software, lento) — ma a quelle risoluzioni quasi nessun player H.264 regge. "
+                   "Per l'H.264 conviene scegliere 4K qui sotto.\n"
                    "• Solo 8-bit SDR: l'H.264 old-style esce a yuv420p. Se la sorgente è HDR, va consegnata in HEVC.\n"
                    "• Quando usarlo: solo per riprodurre su player datati o dispositivi che NON supportano HEVC. "
                    "Per la Quest 3/3S, l'HEVC è sempre la scelta migliore (più leggero E più fluido).")
@@ -367,11 +383,12 @@ class EncoderApp:
         self.spn_w = ttk.Spinbox(row_res, from_=1024, to=8192, increment=128,
                                  textvariable=self.custom_w, width=7, state="disabled")
         self.spn_w.pack(side="left")
-        ttk.Label(row_res, text="× metà (2:1 automatico)").pack(side="left", padx=(2, 6))
+        ttk.Label(row_res, text="× altezza automatica").pack(side="left", padx=(2, 6))
         self._hint(frm_res, "→ 'Originale' mantiene la risoluzione del ProRes (preferibile se coincide col target). "
                             "Il limite non è il decoder della Quest, sono i bit per pixel: 60 fps o nitidezza, non entrambi. "
                             "Movimento → 6K60; nitidezza → 8K30. Un 8K60 da Pro 2 va scalato a 6K60 se strozzato. "
-                            "'Personalizzata' = scrivi la larghezza, l'altezza è sempre la metà (equirettangolare 2:1). "
+                            "'Personalizzata' = scrivi la larghezza. L'altezza segue la Modalità 3D: metà per il mono (2:1), "
+                            "uguale per lo stereo Top-Bottom (1:1), un quarto per il Side-by-Side (4:1). "
                             "Scala lanczos, senza riesportare da Premiere. Si può solo scendere: se il target non è più "
                             "piccolo del sorgente lo scaling viene saltato (lo dice il log).")
 
@@ -399,8 +416,8 @@ class EncoderApp:
                      values=["Mono (2D)",
                              "Stereo Top-Bottom (TB)",
                              "Stereo Side-by-Side (SBS)"]).grid(row=1, column=1, sticky="w", padx=6, pady=2)
-        self._hint(frm_meta, "→ Mono per X5, X6 e Pro 2 (un solo punto di vista). Top-Bottom / Side-by-Side solo se hai "
-                             "girato/montato in 3D stereoscopico (occhio sx e dx affiancati o sovrapposti nel frame). "
+        self._hint(frm_meta, "→ Mono per X5, X6 e Pro 2 in modalità 2D. Top-Bottom per la Pro 2 in 3D (8K 3D = 7680×7680). "
+                             "Top-Bottom / Side-by-Side solo se hai girato/montato in 3D stereoscopico (occhio sx e dx affiancati o sovrapposti nel frame). "
                              "Sbagliare qui fa vedere doppio o piatto nel visore.",
                    row=2, column=0, columnspan=4, sticky="w", padx=6)
 
@@ -613,16 +630,19 @@ class EncoderApp:
     def _target_res(self):
         """(w, h) di destinazione, oppure None se nessun ridimensionamento."""
         res = RESOLUTIONS.get(self.resolution.get())
+        if res is None:
+            return None
         if res == "custom":
             try:
                 w = int(self.custom_w.get())
             except ValueError:
                 return None
-            w -= w % 2          # larghezza pari
-            h = w // 2
-            h -= h % 2          # altezza pari
-            return (w, h)
-        return res
+        else:
+            w = res[0]
+        w -= w % 2          # larghezza pari
+        h = w // STEREO_ASPECT.get(self.stereo.get(), 2)
+        h -= h % 2          # altezza pari
+        return (w, h)
 
     def _scale_plan(self, src):
         """((w, h) o None, nota o None). Blocca upscale e scaling inutili."""
@@ -649,6 +669,19 @@ class EncoderApp:
         w, h = self._scale_plan(src)[0] or (sw, sh)
         return "high" if w * h * fps > X265_HIGH_THRESHOLD else "std"
 
+    def _out_size(self, src):
+        """(w, h) del video in uscita, o None se il sorgente non è leggibile."""
+        res = self._scale_plan(src)[0]
+        if res:
+            return res
+        info = ffprobe_video(src)
+        return info[:2] if info else None
+
+    def _h264_software(self, src):
+        """True se l'H.264 va fatto con libx264 (VideoToolbox non regge la risoluzione)."""
+        size = self._out_size(src)
+        return bool(size) and max(size) > H264_VT_MAX_SIDE
+
     def build_cmd(self, src, dst):
         cmd = ["ffmpeg", "-y", "-i", src]
 
@@ -669,8 +702,11 @@ class EncoderApp:
             tag = "hvc1"
         elif enc == "h264":
             # old-style: 8-bit, GOP 1s, bufsize ridotto per limitare gli spike sulla Quest
-            cmd += ["-c:v", "h264_videotoolbox",
-                    "-b:v", f"{br}M", "-maxrate", f"{br}M",
+            if self._h264_software(src):
+                cmd += ["-c:v", "libx264", "-preset", "fast"]
+            else:
+                cmd += ["-c:v", "h264_videotoolbox"]
+            cmd += ["-b:v", f"{br}M", "-maxrate", f"{br}M",
                     "-bufsize", f"{max(50, int(float(br) / 2))}M",
                     "-pix_fmt", "yuv420p", "-g", "60"]
             tag = "avc1"
@@ -708,8 +744,11 @@ class EncoderApp:
         cmd = list(EXIFTOOL_BASE)
         if self.overwrite_meta.get():
             cmd.append("-overwrite_original")
+        # StitchingSoftware non è decorativo: senza, ffmpeg scarta il box
+        # ("Invalid spherical metadata found") e non vede il 360.
         cmd += ['-XMP-GSpherical:Spherical=true',
                 '-XMP-GSpherical:Stitched=true',
+                f'-XMP-GSpherical:StitchingSoftware={APP_TITLE}',
                 '-XMP-GSpherical:ProjectionType=equirectangular',
                 f'-XMP-GSpherical:StereoMode={stereo}',
                 path]
@@ -744,9 +783,13 @@ class EncoderApp:
         note = self._scale_plan(src)[1]
         if note:
             self.log(f"[risoluzione] {note}\n")
+        if self.encoder.get() == "h264" and self._h264_software(src):
+            w, h = self._out_size(src)
+            self.log(f"[h264] {w}×{h} supera i {H264_VT_MAX_SIDE} px di h264_videotoolbox: uso libx264 "
+                     f"(lento). Molti player H.264 non decodificano oltre il 4K.\n")
         if self.encoder.get() == "sw":
             tier = self._x265_tier(src)
-            self.log("[x265] fascia " + ("alta (VBV 160 Mbps, high tier)" if tier == "high"
+            self.log("[x265] fascia " + ("alta (VBV 160 Mbps)" if tier == "high"
                                          else "standard (VBV 120 Mbps)") + "\n")
 
     def start(self):
