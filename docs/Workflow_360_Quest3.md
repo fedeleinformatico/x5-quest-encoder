@@ -9,7 +9,7 @@ spaziali → riproduzione nel visore.
 **Destinazione:** Meta Quest 3 / 3S, file locale sideloadato, player DeoVR / Pigasus.
 
 > Sostituisce i due documenti precedenti (workflow X5 e workflow X5 + Pro 2),
-> consultabili nella storia git di questo file. La sezione 14 elenca cosa è
+> consultabili nella storia git di questo file. La sezione 15 elenca cosa è
 > cambiato e perché, per chi conosceva le versioni vecchie.
 
 ---
@@ -27,13 +27,18 @@ Il punto è che risoluzione e framerate **consumano entrambi lo stesso budget**.
 Raddoppiare il framerate dimezza i bit per pixel esattamente come raddoppiare i
 pixel. E il budget non è elastico: è il tetto che la Quest riesce a ingerire.
 
-La conseguenza pratica, contro-intuitiva:
+La conseguenza pratica:
 
-> **Un 8K strozzato è peggio di un 6K pieno.** Se imposti CRF 16 con un cap a
-> 120 Mbps su un 8K60, il CRF non viene mai raggiunto — il VBV strozza prima.
-> Quello che ottieni non è "8K a CRF 16", è "8K a 120 Mbps forzati", cioè circa
-> la metà dei bit per pixel di un 5.7K60. Sulle scene complesse — fogliame,
-> acqua, folla — vedi blocchi proprio dove l'8K dovrebbe servire.
+> **A 8K60 il CRF è un desiderio, non un risultato.** Se imposti CRF 16 con un
+> cap a 120 Mbps, il CRF non viene mai raggiunto: quello che ottieni è "8K a
+> 120 Mbps forzati", circa la metà dei bit per pixel di un 5.7K60.
+
+Quanto questo si traduca in "meglio scendere di risoluzione" **dipende
+dall'encoder**, e le misure della sezione 14 lo ridimensionano: con x265 un 8K60
+strozzato resta comunque meglio di un 6K60 allo stesso bitrate; con l'encoder
+hardware, che spreca di più, il 6K recupera. Quello che le misure confermano
+senza ambiguità è che a 8K60 **il bitrate serve tutto**: la qualità continua a
+salire ben oltre i 200 Mbps, senza plateau.
 
 Tabella di riferimento (FOV = pixel reali dentro il campo visivo di ~100°,
 che è ciò che l'occhio vede davvero; il resto della sfera è dietro la testa):
@@ -105,12 +110,13 @@ Due riferimenti che vanno tenuti distinti:
 ### Codec
 
 - **HEVC**: la scelta di riferimento. Decodifica hardware fino all'8K.
-- **AV1**: decodificato in hardware dalla Quest 3, **~30% di bitrate in meno a
-  parità di qualità**. È la leva che sbloccherebbe davvero le risoluzioni alte
-  (stima: a 100 Mbps un 7K AV1 dovrebbe stare sopra un 5.7K HEVC). Due prezzi:
-  nessuna accelerazione VideoToolbox per l'encoding AV1 su Mac → tempi lunghi in
-  CPU (`libsvtav1`); e va **verificato** che il player usato lo riproduca.
-  Da valutare, non ancora in produzione.
+- **AV1**: decodificato in hardware dalla Quest 3, ed è la leva vera.
+  **Misurato su 8K60** (sezione 14): a 122 Mbps rende come l'HEVC hardware a
+  206 Mbps, e come x265 `slow`, ma impiegando **un sesto** del tempo di x265.
+  DeoVR lo ha adottato come codec predefinito. Due cautele: nessuna
+  accelerazione hardware per l'encoding su Mac (`libsvtav1` gira in CPU), e
+  **SVT-AV1 dichiara l'8K come sperimentale**. Va verificato nel visore, player
+  per player.
 - **H.264**: solo compatibilità con hardware datato. Vedi sezione 9.
 
 ---
@@ -286,8 +292,15 @@ Punti obbligatori:
 - **`-movflags +faststart`** — moov in testa, la Quest apre il file più in fretta.
 - I tag colore devono combaciare con la sorgente (sezione 8).
 
-Bitrate: **120 Mbps** per 6K60 e 8K30 da file locale. Salire a 140-150 se compare
-blocking su fogliame o acqua.
+Bitrate: **120 Mbps** per 6K60 e 8K30 da file locale. Per un 8K60 servono di più
+(sezione 14): a 120-130 Mbps l'hardware non basta.
+
+Due cose da sapere su VideoToolbox:
+
+- **Sfora il target del 3-9%**: `-b:v 120M` produce 124-131 Mbps reali. Tienine
+  conto quando il bitrate è vicino al limite del player.
+- **È il meno efficiente per bit**: a parità di qualità gli serve circa il 60%
+  di bitrate in più di x265 `slow`. Si paga in dimensione del file, non in tempo.
 
 ### Ridimensionamento
 
@@ -305,9 +318,12 @@ side-by-side 4:1.
 
 ## 7. Alternativa software — libx265
 
-Resa migliore a parità di bitrate, tempi molto più lunghi. VideoToolbox è "buono
-ma non bello"; `libx265 -preset fast` è il compromesso quando la resa conta più
-della velocità.
+Resa migliore a parità di bitrate, tempi molto più lunghi.
+
+**Il preset vale quanto un gradino di bitrate.** Misurato su 8K60 (sezione 14):
+`slow` a 120 Mbps rende come `medium` a 160 e come l'hardware a 165. Se la resa
+conta, il preset è la prima leva da usare, non l'ultima — `fast` resta la scelta
+quando il tempo è il vincolo.
 
 **I parametri x265 vanno tarati sulla risoluzione.** Un'unica stringa fissa non
 funziona: il `vbv-maxrate` tarato sul 5.7K strozza tutto quello che sta sopra.
@@ -556,8 +572,8 @@ Dipendenze da riga di comando: `ffmpeg`, `ffprobe`, `exiftool`
 - **Batch** di file ProRes/MOV → `<nome>_quest.mp4`.
 - **Cartella di destinazione separata** — utile per scrivere su un disco diverso da
   quello del sorgente (più veloce, e aggira il disco pieno).
-- **Tre encoder**: HEVC hardware (★ default), HEVC software x265 tuned, H.264 old-style
-  (VideoToolbox fino a 4096 px, libx264 sopra).
+- **Quattro encoder**: HEVC hardware (★ default), HEVC software x265 tuned,
+  **AV1 (libsvtav1)**, H.264 old-style (VideoToolbox fino a 4096 px, libx264 sopra).
 - **Ridimensionamento** con scaler lanczos, preset nativi (8K, 6K 6016×3008 della
   X6, 5.7K della X5) + larghezza personalizzata. L'altezza segue la modalità 3D:
   2:1 mono, 1:1 top-bottom, 4:1 side-by-side.
@@ -614,7 +630,62 @@ catena e dare alla Quest un file che decodifica fluido.
 
 ---
 
-## 14. Cosa è cambiato rispetto ai documenti precedenti
+## 14. Misure sul campo — quanto rende ogni scelta
+
+Tutto quello che segue è **misurato**, non stimato: 6 secondi di un master
+ProRes 8K60 reale (Insta360 Pro 2, volo in parapendio), codificati e confrontati
+con l'originale tramite **VMAF** (100 = identico all'originale). Ogni riga
+riporta il bitrate realmente prodotto. Hardware: Mac M4, FFmpeg 8.1, x265 4.2,
+SVT-AV1 4.1.
+
+### 8K60, a confronto
+
+| Codifica | Mbps reali | VMAF | peggior 5% | tempo per 6 min |
+|----------|-----------:|-----:|-----------:|----------------:|
+| HEVC hardware 130 | 133 | 92,3 | 90,2 | ~22 min |
+| HEVC hardware 160 | 165 | 94,0 | 92,1 | ~25 min |
+| HEVC hardware 200 | 206 | 95,2 | 93,3 | ~25 min |
+| x265 `fast`, tetto 160 | 138 | 94,7 | 91,0 | ~1,6 h |
+| x265 `slow`, tetto 120 | 103 | 94,8 | 91,3 | ~3,5 h |
+| **x265 `slow`, tetto 160** | 138 | **95,7** | 92,7 | ~3,5 h |
+| **AV1 preset 8, CRF 28** | **122** | **95,2** | 91,7 | **~34 min** |
+| AV1 preset 8, CRF 24 | 177 | 96,6 | 93,3 | ~25 min |
+| x265 `slow`, CRF 12 (senza tetto) | 345 | 98,6 | 96,7 | — |
+
+### Le tre leve, in ordine di efficacia
+
+1. **Il framerate.** Lo stesso 8K a **30 fps** e 120 Mbps arriva a **98,3**
+   contro 94,8 a 60 fps: ogni fotogramma riceve il doppio dei bit. È il salto
+   più grande disponibile, e si paga solo in fluidità del movimento.
+2. **Il codec.** AV1 a 122 Mbps = HEVC hardware a 206 Mbps. Stessa qualità,
+   **40% di bitrate in meno**, e sei volte più veloce di x265 `slow`.
+3. **Il bitrate.** Su 8K60 non c'è saturazione: si guadagna fino a 345 Mbps.
+   Se il file è destinato al visore, il tetto lo mette la Quest, non la curva.
+
+### Risoluzione: 8K60 contro 6K60, stesso bitrate
+
+| | 6K60 | 8K60 |
+|---|---:|---:|
+| x265 `slow`, ~103 Mbps | 94,3 | **94,8** |
+| HEVC hardware, ~124 Mbps | **92,2** | 91,7 |
+
+Con un encoder efficiente l'8K resta avanti anche strozzato. Con l'hardware si
+inverte. Da qui la regola pratica: **se codifichi in hardware, scendere a 6K ha
+senso; se codifichi in x265 o AV1, tieni l'8K.**
+
+### Cosa non dicono questi numeri
+
+- **Una sola clip di 6 secondi**, con molto cielo: una scena non facilissima ma
+  nemmeno estrema.
+- **VMAF non conosce l'equirettangolare** e non è tarato per l'8K. Penalizza
+  inoltre i parametri psicovisivi di x265, che nel visore aiutano.
+- **Il visore decide.** Un punto di VMAF non si vede; quattro sì.
+- Lo script per rifare le misure sulle proprie clip è in
+  [`tools/bench_quality.sh`](../tools/bench_quality.sh).
+
+---
+
+## 15. Cosa è cambiato rispetto ai documenti precedenti
 
 Per chi conosceva le versioni vecchie — correzioni sostanziali, non riscritture
 cosmetiche.
@@ -669,8 +740,10 @@ Allineato per fascia di risoluzione nella sezione 7.
    Sulla X6 sono entrambi nativi; la X5 ha 8K30 e 5.7K60. Solo in discesa, mai upscale.
 4. **Verifica il colore** della sorgente e imposta i tag giusti. Con Dolby Vision,
    decidi *prima di girare*.
-5. **FFmpeg** → `hevc_videotoolbox -b:v 120M -profile:v main10 -tag:v hvc1`,
-   oppure `libx265 -preset fast` con i parametri della **fascia giusta** (sezione 7).
+5. **FFmpeg** → `hevc_videotoolbox -b:v 120M -profile:v main10 -tag:v hvc1` per la
+   velocità, `libx265 -preset slow` con i parametri della **fascia giusta**
+   (sezione 7) per la resa, **AV1** se il player nel visore lo digerisce
+   (sezione 14).
 6. **Metadati** → `exiftool -api LargeFileSupport=1` con `StitchingSoftware`,
    + verifica del tag `hvc1`.
    Tieni libero il doppio dello spazio.
