@@ -8,9 +8,9 @@ spaziali → riproduzione nel visore.
 **Piattaforma di lavoro:** macOS Apple Silicon (M4).
 **Destinazione:** Meta Quest 3 / 3S, file locale sideloadato, player DeoVR / Pigasus.
 
-> Sostituisce i due documenti precedenti (`Workflow_X5_Quest3_Export360_OLD.md` e
-> `Workflow_X5_ISTAPRO2_Quest3_Export360.md`). La sezione 11 elenca cosa è cambiato
-> e perché, per chi conosceva le versioni vecchie.
+> Sostituisce i due documenti precedenti (workflow X5 e workflow X5 + Pro 2),
+> consultabili nella storia git di questo file. La sezione 14 elenca cosa è
+> cambiato e perché, per chi conosceva le versioni vecchie.
 
 ---
 
@@ -294,7 +294,11 @@ della velocità.
 **I parametri x265 vanno tarati sulla risoluzione.** Un'unica stringa fissa non
 funziona: il `vbv-maxrate` tarato sul 5.7K strozza tutto quello che sta sopra.
 
-### 5.7K / 6K (fino a ~1150 Mpx/s)
+La fascia si decide sui **pixel codificati al secondo** (colonna Mpx/s della
+sezione 1), non sul nome della risoluzione: un 8K30 (885 Mpx/s) sta nella fascia
+bassa, un 7K60 (1329 Mpx/s) in quella alta. La GUI sceglie da sola (soglia 1200 Mpx/s).
+
+### Fascia standard — fino a ~1150 Mpx/s (5.7K60, 6K60, 8K30)
 
 ```
 keyint=60:min-keyint=60:bframes=3:aq-mode=3:
@@ -302,7 +306,7 @@ psy-rd=2.0:psy-rdoq=1.0:sao=0:rc-lookahead=40:
 vbv-maxrate=120000:vbv-bufsize=240000
 ```
 
-### 7K / 8K (sopra ~1300 Mpx/s)
+### Fascia alta — sopra ~1300 Mpx/s (7K60, 8K50, 8K60)
 
 ```
 keyint=60:min-keyint=60:bframes=4:aq-mode=3:
@@ -518,15 +522,19 @@ Dipendenze da riga di comando: `ffmpeg`, `ffprobe`, `exiftool`
 - **Cartella di destinazione separata** — utile per scrivere su un disco diverso da
   quello del sorgente (più veloce, e aggira il disco pieno).
 - **Tre encoder**: HEVC hardware (★ default), HEVC software x265 tuned, H.264 old-style.
-- **Ridimensionamento** con scaler lanczos, preset + larghezza personalizzata
-  (altezza sempre 2:1 automatica).
+- **Ridimensionamento** con scaler lanczos, preset nativi (8K, 6K 6016×3008 della
+  X6, 5.7K della X5) + larghezza personalizzata (altezza sempre 2:1 automatica).
+  **Solo in discesa**: se il target è più grande del sorgente (o uguale) lo scaling
+  viene saltato e il log lo segnala.
+- **Parametri x265 per fascia** (sezione 7), scelti in automatico da risoluzione di
+  uscita e framerate del sorgente.
 - **Rileva il colore dalla sorgente** con ffprobe e imposta SDR / PQ / HLG da solo.
 - **Audio**: AAC stereo 320k, AAC multicanale 512k, o nessun audio.
 - **Metadati 360** via exiftool con `LargeFileSupport`, modalità Mono / TB / SBS.
 - **Solo metadati** su un MP4 esistente (senza ricodificare) — la strada per
   recuperare un encode finito male.
 - **Verifica metadati** via exiftool, con avviso se manca lo Spherical o se il
-  codec tag non è `hvc1`.
+  codec tag è `hev1` invece di `hvc1`.
 - **Stima spazio** dell'intero batch raggruppata per volume, senza codificare niente.
 - **Controllo preventivo dello spazio** prima di ogni file: se non ci sta, salta e
   lo dice invece di scrivere un file troncato.
@@ -537,9 +545,9 @@ Dipendenze da riga di comando: `ffmpeg`, `ffprobe`, `exiftool`
 **Limiti noti:**
 
 - Non fa tone-mapping HDR→SDR (va fatto in Premiere).
-- Non impedisce ancora l'upscale: se scegli una risoluzione più alta della sorgente,
-  la esegue. Da usare con attenzione finché non è aggiunto il blocco.
-- Il preset "6K — 6144×3072" **non** è il 6K nativo della X6 (6016×3008).
+- Non scrive i metadati di audio ambisonico (SA3D): per quelli serve lo
+  [spatial-media](https://github.com/google/spatial-media) di Google.
+- Bitrate di default HEVC hardware: **120 Mbps** (sezione 6).
 
 ---
 
@@ -591,7 +599,8 @@ lente". È invece la configurazione di massima qualità dell'intera catena (sezi
 "CRF 16" in "120 Mbps forzati".
 
 **Aggiornato: la risoluzione non si decide più solo in Premiere.** I doc dicevano
-che "FFmpeg/GUI non ridimensionano". La GUI ora ha lo scaler lanczos.
+che "FFmpeg/GUI non ridimensionano". La GUI ora ha lo scaler lanczos, con il 6K
+nativo X6 (6016×3008, non più 6144×3072) e il blocco dell'upscale.
 
 **Aggiornato: la X6 e il 10-bit.** Nuova sorgente, nuovi modi nativi, Dolby Vision,
 e la premessa "sorgente 8-bit" che non vale più per il ProRes.

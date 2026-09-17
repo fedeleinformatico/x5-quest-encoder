@@ -2,8 +2,11 @@
 # -*- coding: utf-8 -*-
 """
 X5 → Quest Encoder
-GUI per codificare video 360 equirettangolari (Insta360 X5) verso Meta Quest 3/3S
-e iniettare i metadati spaziali. Pensata per macOS / Apple Silicon.
+GUI per codificare video 360 equirettangolari (Insta360 X5 / X6 / Pro 2, già
+stitchati ed esportati in ProRes) verso Meta Quest 3/3S e iniettare i metadati
+spaziali. Pensata per macOS / Apple Silicon.
+
+Riferimento completo: docs/Workflow_360_Quest3.md
 
 Dipendenze esterne (riga di comando):
   - ffmpeg / ffprobe  (brew install ffmpeg)
@@ -12,6 +15,7 @@ Dipendenze esterne (riga di comando):
 Avvio:  python3 x5_quest_encoder.py
 """
 
+import json
 import os
 import re
 import shlex
@@ -24,24 +28,42 @@ from tkinter import ttk, filedialog, messagebox
 
 APP_TITLE = "X5 → Quest Encoder"
 
-# Parametri x265 "tuned" definiti per il 360 mono 5.7K60.
-X265_PARAMS = (
+# Parametri x265 tarati per fascia di carico (pixel al secondo), vedi sezione 7
+# del workflow: una stringa unica con vbv-maxrate=120000 strozza tutto quello
+# che sta sopra il 6K60.
+# Fascia bassa: 5.7K60, 6K60, 8K30 (fino a ~1150 Mpx/s).
+X265_PARAMS_STD = (
     "keyint=60:min-keyint=60:bframes=3:aq-mode=3:"
     "psy-rd=2.0:psy-rdoq=1.0:sao=0:rc-lookahead=40:"
     "vbv-maxrate=120000:vbv-bufsize=240000"
 )
+# Fascia alta: 7K60, 8K50, 8K60 (sopra ~1300 Mpx/s). high-tier=1 è necessario:
+# senza, il Level 6.1 Main tier riporta il VBV a 120 Mbps.
+X265_PARAMS_HIGH = (
+    "keyint=60:min-keyint=60:bframes=4:aq-mode=3:"
+    "psy-rd=1.5:psy-rdoq=1.0:sao=0:rc-lookahead=25:"
+    "vbv-maxrate=160000:vbv-bufsize=320000:"
+    "level-idc=6.1:high-tier=1"
+)
+# Soglia tra le due fasce, in pixel codificati al secondo.
+X265_HIGH_THRESHOLD = 1_200_000_000
 
-# Tetto di bitrate imposto dal VBV sopra (kbps -> Mbps): serve per stimare
-# la dimensione massima dell'output in modalità CRF.
-X265_VBV_MAXRATE_MBPS = 120
+# Tetti di bitrate imposti dal VBV (Mbps): servono per stimare la dimensione
+# massima dell'output in modalità CRF.
+X265_VBV_MAXRATE_MBPS = {"std": 120, "high": 160}
+
+# Bitrate consigliati (Mbps) per gli encoder a bitrate fisso.
+DEFAULT_BITRATE = {"hw": "120", "h264": "200"}
 
 # Risoluzioni output (equirettangolari 2:1). None = mantieni originale.
+# Si può solo scendere: se il target non è più piccolo del sorgente, lo
+# scaling viene saltato (vedi _scale_plan).
 RESOLUTIONS = {
     "Originale (nessun ridimensionamento)": None,
-    "8K — 7680×3840 (nitidezza max, 8K60 a rischio stutter)": (7680, 3840),
-    "7K — 6656×3328 (quasi 8K, vicino ai limiti Quest)": (6656, 3328),
-    "6K — 6144×3072 (intermedio, buon compromesso 60fps)": (6144, 3072),
-    "5.7K — 5760×2880 (fluido a 60fps, sicuro sulla Quest)": (5760, 2880),
+    "8K — 7680×3840 (nativo X6 / Pro 2 · 8K30 = qualità max)": (7680, 3840),
+    "7K — 6656×3328 (a 60fps pochi bit per pixel)": (6656, 3328),
+    "6K — 6016×3008 (nativo X6 · 6K60 per il movimento)": (6016, 3008),
+    "5.7K — 5760×2880 (nativo X5)": (5760, 2880),
     "4K — 3840×1920 (leggerissimo, per test/anteprime)": (3840, 1920),
     "Personalizzata…": "custom",
 }
@@ -73,6 +95,34 @@ EXIFTOOL_BASE = ["exiftool", "-api", "LargeFileSupport=1"]
 
 def which(cmd):
     return shutil.which(cmd)
+
+
+_probe_cache = {}
+
+
+def ffprobe_video(path):
+    """(larghezza, altezza, fps) del primo stream video, o None. Con cache."""
+    try:
+        key = (path, os.path.getmtime(path))
+    except OSError:
+        return None
+    if key in _probe_cache:
+        return _probe_cache[key]
+    info = None
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=width,height,avg_frame_rate",
+             "-of", "json", path],
+            capture_output=True, text=True, timeout=30)
+        st = json.loads(out.stdout)["streams"][0]
+        num, _, den = st.get("avg_frame_rate", "0/1").partition("/")
+        fps = float(num) / float(den or 1) if float(den or 1) else 0.0
+        info = (int(st["width"]), int(st["height"]), fps)
+    except Exception:
+        pass
+    _probe_cache[key] = info
+    return info
 
 
 def ffprobe_duration(path):
@@ -244,7 +294,7 @@ class EncoderApp:
                         variable=self.encoder, value="h264",
                         command=self._sync_enc_widgets).grid(row=2, column=0, columnspan=4, sticky="w", padx=6, pady=2)
         self._hint(frm_enc, "→ HEVC HW = default: veloce, leggero, decodifica sicura sulla Quest 3. Software = resa migliore "
-                            "su fogliame/cieli ma 15-40 min/clip. H.264 = solo per compatibilità con player/dispositivi "
+                            "su fogliame/cieli ma molto più lento (a 8K ~4-5 fps su M4). H.264 = solo per compatibilità con player/dispositivi "
                             "vecchi — vedi i limiti nel riquadro H.264 più sotto.",
                    row=3, column=0, columnspan=4, sticky="w", padx=6)
 
@@ -261,17 +311,19 @@ class EncoderApp:
         self.spn_crf.grid(row=4, column=3, sticky="w", padx=6, pady=2)
         self._hint(frm_enc, "→ Preset: 'fast' ottimo compromesso, 'medium' un filo meglio, 'slower' inutile per il 360 "
                             "(ore di attesa). CRF: 16 = altissima qualità; più basso (14) = più pesante, più alto (18-20) = più leggero. "
-                            "In CRF la dimensione finale non è prevedibile: la stima usa il tetto VBV (120 Mbps), quindi è prudenziale.",
+                            "I parametri x265 si scelgono da soli in base al carico: fino a 6K60/8K30 tetto VBV 120 Mbps, "
+                            "7K60/8K50/8K60 tetto 160 Mbps (high tier). "
+                            "In CRF la dimensione finale non è prevedibile: la stima usa il tetto VBV, quindi è prudenziale.",
                    row=5, column=0, columnspan=4, sticky="w", padx=6)
 
         # bitrate (hardware HEVC e H264)
         ttk.Label(frm_enc, text="Bitrate (Mbps):").grid(row=6, column=0, sticky="e", padx=6)
-        self.bitrate = tk.StringVar(value="100")
+        self.bitrate = tk.StringVar(value=DEFAULT_BITRATE["hw"])
         self.spn_br = ttk.Spinbox(frm_enc, from_=40, to=250, textvariable=self.bitrate, width=6)
         self.spn_br.grid(row=6, column=1, sticky="w", padx=6, pady=2)
-        self._hint(frm_enc, "→ Per HEVC HW: 100 Mbps su paesaggi (120-140 se vedi blocchi su acqua/foglie). "
+        self._hint(frm_enc, "→ Per HEVC HW: 120 Mbps per 6K60 e 8K30 da file locale (140-150 se vedi blocchi su acqua/foglie). "
                             "Per H.264 old-style: 200 Mbps è il valore classico Quest. Cambiando encoder il valore "
-                            "consigliato si imposta da solo. Promemoria: 100 Mbps = circa 0,75 GB al minuto.",
+                            "consigliato si imposta da solo. Promemoria: 120 Mbps = circa 0,9 GB al minuto.",
                    row=7, column=0, columnspan=4, sticky="w", padx=6)
 
         # --- Riquadro limiti H.264 ---
@@ -311,15 +363,17 @@ class EncoderApp:
                      ).pack(side="left", padx=6, pady=6)
         self.resolution.trace_add("write", lambda *a: self._sync_res_widgets())
         ttk.Label(row_res, text="Larghezza:").pack(side="left", padx=(12, 2))
-        self.custom_w = tk.StringVar(value="6144")
+        self.custom_w = tk.StringVar(value="6016")
         self.spn_w = ttk.Spinbox(row_res, from_=1024, to=8192, increment=128,
                                  textvariable=self.custom_w, width=7, state="disabled")
         self.spn_w.pack(side="left")
         ttk.Label(row_res, text="× metà (2:1 automatico)").pack(side="left", padx=(2, 6))
-        self._hint(frm_res, "→ 'Originale' mantiene la risoluzione del ProRes. Usa 5.7K/6K se l'8K60 scatta nelle curve "
-                            "sulla Quest (il decoder scala col numero di pixel: 5.7K≈56%, 6K≈64%, 7K≈75% dell'8K). "
+        self._hint(frm_res, "→ 'Originale' mantiene la risoluzione del ProRes (preferibile se coincide col target). "
+                            "Il limite non è il decoder della Quest, sono i bit per pixel: 60 fps o nitidezza, non entrambi. "
+                            "Movimento → 6K60; nitidezza → 8K30. Un 8K60 da Pro 2 va scalato a 6K60 se strozzato. "
                             "'Personalizzata' = scrivi la larghezza, l'altezza è sempre la metà (equirettangolare 2:1). "
-                            "Scala lanczos, senza riesportare da Premiere. Puoi solo scendere, non inventare dettaglio.")
+                            "Scala lanczos, senza riesportare da Premiere. Si può solo scendere: se il target non è più "
+                            "piccolo del sorgente lo scaling viene saltato (lo dice il log).")
 
         # --- Audio ---
         frm_aud = ttk.LabelFrame(self.body, text="Audio")
@@ -345,7 +399,7 @@ class EncoderApp:
                      values=["Mono (2D)",
                              "Stereo Top-Bottom (TB)",
                              "Stereo Side-by-Side (SBS)"]).grid(row=1, column=1, sticky="w", padx=6, pady=2)
-        self._hint(frm_meta, "→ Mono per la X5 standard (un solo punto di vista). Top-Bottom / Side-by-Side solo se hai "
+        self._hint(frm_meta, "→ Mono per X5, X6 e Pro 2 (un solo punto di vista). Top-Bottom / Side-by-Side solo se hai "
                              "girato/montato in 3D stereoscopico (occhio sx e dx affiancati o sovrapposti nel frame). "
                              "Sbagliare qui fa vedere doppio o piatto nel visore.",
                    row=2, column=0, columnspan=4, sticky="w", padx=6)
@@ -390,10 +444,10 @@ class EncoderApp:
         self.spn_br.config(state="disabled" if sw else "normal")
         # bitrate consigliato per encoder, solo se l'utente non l'ha "personalizzato"
         cur = self.bitrate.get().strip()
-        if enc == "h264" and cur in ("", "100"):
-            self.bitrate.set("200")
-        elif enc == "hw" and cur in ("", "200"):
-            self.bitrate.set("100")
+        if enc == "h264" and cur in ("", DEFAULT_BITRATE["hw"]):
+            self.bitrate.set(DEFAULT_BITRATE["h264"])
+        elif enc == "hw" and cur in ("", DEFAULT_BITRATE["h264"]):
+            self.bitrate.set(DEFAULT_BITRATE["hw"])
 
     # ------------------------------------------------------------- deps
     def _check_deps(self):
@@ -471,18 +525,19 @@ class EncoderApp:
         color = "#b00" if free < 20e9 else ("#a60" if free < 60e9 else "#060")
         self.lbl_free.config(text=f"Spazio libero su {root}: {human_gb(free)}", foreground=color)
 
-    def estimate_output(self, dur):
+    def estimate_output(self, src, dur):
         """Stima prudenziale dei byte dell'MP4 di output."""
         if not dur:
             return None
         enc = self.encoder.get()
         if enc == "sw":
-            mbps = X265_VBV_MAXRATE_MBPS      # tetto VBV: caso peggiore in CRF
+            # tetto VBV della fascia: caso peggiore in CRF
+            mbps = X265_VBV_MAXRATE_MBPS[self._x265_tier(src)]
         else:
             try:
-                mbps = float(self.bitrate.get().strip() or "100")
+                mbps = float(self._bitrate())
             except ValueError:
-                mbps = 100.0
+                mbps = float(DEFAULT_BITRATE["hw"])
         mode = AUDIO_MODES.get(self.audio.get(), "stereo")
         mbps += {"stereo": 0.32, "multi": 0.52, "none": 0.0}[mode]
         return dur * mbps * 1e6 / 8 * 1.02     # +2% di overhead contenitore
@@ -499,7 +554,7 @@ class EncoderApp:
             per_volume = {}
             for src in files:
                 dur = ffprobe_duration(src)
-                est = self.estimate_output(dur)
+                est = self.estimate_output(src, dur)
                 dst = self.dest_for(src)
                 folder = os.path.dirname(dst) or "."
                 if est is None:
@@ -552,6 +607,9 @@ class EncoderApp:
         messagebox.showinfo(APP_TITLE, f"Rilevato: {guess}\nImpostazione colore aggiornata.")
 
     # --------------------------------------------------- command build
+    def _bitrate(self):
+        return self.bitrate.get().strip() or DEFAULT_BITRATE.get(self.encoder.get(), DEFAULT_BITRATE["hw"])
+
     def _target_res(self):
         """(w, h) di destinazione, oppure None se nessun ridimensionamento."""
         res = RESOLUTIONS.get(self.resolution.get())
@@ -566,6 +624,31 @@ class EncoderApp:
             return (w, h)
         return res
 
+    def _scale_plan(self, src):
+        """((w, h) o None, nota o None). Blocca upscale e scaling inutili."""
+        res = self._target_res()
+        if not res:
+            return None, None
+        info = ffprobe_video(src)
+        if not info:
+            return res, None
+        sw, sh, _ = info
+        if res[0] > sw or res[1] > sh:
+            return None, (f"target {res[0]}×{res[1]} più grande del sorgente {sw}×{sh}: "
+                          f"niente upscale, mantengo l'originale")
+        if res == (sw, sh):
+            return None, f"target uguale al sorgente ({sw}×{sh}): nessuno scaling"
+        return res, None
+
+    def _x265_tier(self, src):
+        """'high' per 7K60/8K50/8K60, 'std' per il resto (vedi X265_HIGH_THRESHOLD)."""
+        info = ffprobe_video(src)
+        if not info:
+            return "std"
+        sw, sh, fps = info
+        w, h = self._scale_plan(src)[0] or (sw, sh)
+        return "high" if w * h * fps > X265_HIGH_THRESHOLD else "std"
+
     def build_cmd(self, src, dst):
         cmd = ["ffmpeg", "-y", "-i", src]
 
@@ -573,13 +656,13 @@ class EncoderApp:
         cmd += ["-map", "0:v:0", "-map", "0:a:0?"]
 
         # ridimensionamento opzionale (scala lanczos, mantiene il 2:1)
-        res = self._target_res()
+        res, _ = self._scale_plan(src)
         if res:
             w, h = res
             cmd += ["-vf", f"scale={w}:{h}:flags=lanczos"]
 
         enc = self.encoder.get()
-        br = self.bitrate.get().strip() or "100"
+        br = self._bitrate()
         if enc == "hw":
             cmd += ["-c:v", "hevc_videotoolbox", "-profile:v", "main10",
                     "-b:v", f"{br}M", "-pix_fmt", "p010le"]
@@ -595,7 +678,8 @@ class EncoderApp:
             cmd += ["-c:v", "libx265", "-preset", self.preset.get(),
                     "-crf", self.crf.get().strip() or "16",
                     "-pix_fmt", "yuv420p10le",
-                    "-x265-params", X265_PARAMS]
+                    "-x265-params",
+                    X265_PARAMS_HIGH if self._x265_tier(src) == "high" else X265_PARAMS_STD]
             tag = "hvc1"
 
         cmd += COLOR_TAGS[self.color.get()]
@@ -650,10 +734,20 @@ class EncoderApp:
         for src in files:
             dst = self.dest_for(src)
             self.log(f"\n# {os.path.basename(src)}\n")
+            self._log_plan(src)
             self.log(cmd_to_str(self.build_cmd(src, dst)) + "\n")
             if self.inject_meta.get():
                 self.log(cmd_to_str(self.exiftool_cmd(dst)) + "\n")
         self.log("======================================================\n")
+
+    def _log_plan(self, src):
+        note = self._scale_plan(src)[1]
+        if note:
+            self.log(f"[risoluzione] {note}\n")
+        if self.encoder.get() == "sw":
+            tier = self._x265_tier(src)
+            self.log("[x265] fascia " + ("alta (VBV 160 Mbps, high tier)" if tier == "high"
+                                         else "standard (VBV 120 Mbps)") + "\n")
 
     def start(self):
         files = list(self.lst_files.get(0, "end"))
@@ -708,7 +802,7 @@ class EncoderApp:
             return False
         free = free_space(folder)
         dur = ffprobe_duration(src)
-        est = self.estimate_output(dur)
+        est = self.estimate_output(src, dur)
         if free is None or est is None:
             self.log("[spazio] impossibile stimare, procedo comunque.\n")
             return True
@@ -725,6 +819,7 @@ class EncoderApp:
 
     def _encode(self, src, dst):
         dur = ffprobe_duration(src)
+        self._log_plan(src)
         cmd = self.build_cmd(src, dst)
         self.log("\n┌─ COMANDO FFMPEG ─────────────────────────────────────────\n")
         self.log(cmd_to_str(cmd) + "\n")
@@ -889,7 +984,10 @@ class EncoderApp:
             if "Spherical" not in blob:
                 self.log("→ ATTENZIONE: nessun tag Spherical. Il file verrà visto come video piatto. "
                          "Usa 'Solo metadati su MP4 esistente…'.\n")
-            if "hvc1" not in blob and "avc1" not in blob:
+            if "hev1" in blob:
+                self.log("→ ATTENZIONE: codec tag 'hev1'. Molti player Quest non lo leggono: "
+                         "va ricodificato con -tag:v hvc1.\n")
+            elif "hvc1" not in blob and "avc1" not in blob:
                 self.log("→ NOTA: codec tag inatteso. Per la Quest l'HEVC deve essere 'hvc1', non 'hev1'.\n")
 
         threading.Thread(target=_do, daemon=True).start()
