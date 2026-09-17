@@ -1,301 +1,636 @@
-# Export video 360° (Insta360 X5 / Pro 2) → Meta Quest 3 / 3S
+# Export video 360° → Meta Quest 3 / 3S
 
-Riferimento operativo per esportare video equirettangolari mono verso Quest, con
-montaggio in Premiere e codifica finale via FFmpeg su Mac (Apple Silicon M4).
-Sorgenti coperte: **X5** (5.7K60) e **Insta360 Pro 2** (8K60), entrambe mono.
+Riferimento operativo unificato per la catena di produzione 360:
+stitching → montaggio in Premiere → master ProRes → codifica FFmpeg → metadati
+spaziali → riproduzione nel visore.
 
----
+**Sorgenti coperte:** Insta360 **X6** (8K50 / 6K60), **X5** (5.7K60), **Pro 2** (8K60).
+**Piattaforma di lavoro:** macOS Apple Silicon (M4).
+**Destinazione:** Meta Quest 3 / 3S, file locale sideloadato, player DeoVR / Pigasus.
 
-## 1. Il problema di partenza
-
-- Export HEVC (H265) da Media Encoder che si **bloccava** sul 5.7K 60fps, sia a
-  200 che a 60 Mbps. H264 200 Mbps usciva regolarmente.
-- Causa su **Apple Silicon**: Media Encoder usa **VideoToolbox**, non NVENC/QuickSync.
-  L'accelerazione hardware HEVC non si agganciava per via della **risoluzione**
-  (5760 px di larghezza è al limite di ciò che l'encoder HEVC hardware accetta;
-  l'H264 hardware ha limiti diversi, per questo passava).
-
-> Su Mac **Voukoder non esiste** (è solo Windows). Il flusso giusto è
-> ProRes → FFmpeg.
+> Sostituisce i due documenti precedenti (`Workflow_X5_Quest3_Export360_OLD.md` e
+> `Workflow_X5_ISTAPRO2_Quest3_Export360.md`). La sezione 11 elenca cosa è cambiato
+> e perché, per chi conosceva le versioni vecchie.
 
 ---
 
-## 2. Il flusso definitivo (3 step)
+## 1. La regola che governa tutto: bit per pixel
+
+Tutte le decisioni su risoluzione e framerate discendono da un unico numero:
+**quanti bit spendi per ogni pixel effettivamente codificato.**
 
 ```
-Premiere (montaggio) → Export ProRes 422 → verifica colore → FFmpeg HEVC → metadati 360
+bit/pixel = bitrate ÷ (larghezza × altezza × fps)
 ```
 
-### Step 0 — Le sorgenti: stitching PRIMA di tutto
+Il punto è che risoluzione e framerate **consumano entrambi lo stesso budget**.
+Raddoppiare il framerate dimezza i bit per pixel esattamente come raddoppiare i
+pixel. E il budget non è elastico: è il tetto che la Quest riesce a ingerire.
 
-I file grezzi delle camere **non** vanno dati a FFmpeg/alla GUI: prima serve lo
-**stitching**, che fa il plugin Insta360 (in Premiere o in Insta360 Studio).
+La conseguenza pratica, contro-intuitiva:
 
-- **Insta360 X5** → file `.insv`: contiene **2 fisheye HEVC 2880×2880** (lenti ant./post.),
-  NON è ancora un 360. Il plugin cuce e riproietta in equirettangolare 5760×2880.
-  Darlo a FFmpeg produrrebbe un singolo fisheye deformato (FFmpeg non ha la
-  calibrazione ottica Insta360).
-- **Insta360 Pro 2** → file `.ins`: è un **manifest di progetto da pochi KB** (4 KB),
-  non il video. Punta ai file originali delle 6 lenti + parametri di stitch. Il plugin
-  Insta360 Pro lo legge e presenta in timeline l'**8K equirettangolare 7680×3840 mono**,
-  già cucito. Anche qui: non si dà l'`.ins` a FFmpeg.
+> **Un 8K strozzato è peggio di un 6K pieno.** Se imposti CRF 16 con un cap a
+> 120 Mbps su un 8K60, il CRF non viene mai raggiunto — il VBV strozza prima.
+> Quello che ottieni non è "8K a CRF 16", è "8K a 120 Mbps forzati", cioè circa
+> la metà dei bit per pixel di un 5.7K60. Sulle scene complesse — fogliame,
+> acqua, folla — vedi blocchi proprio dove l'8K dovrebbe servire.
 
-In entrambi i casi l'input della catena è **sempre il ProRes/MP4 già stitchato**,
-mai il file grezzo della camera.
+Tabella di riferimento (FOV = pixel reali dentro il campo visivo di ~100°,
+che è ciò che l'occhio vede davvero; il resto della sfera è dietro la testa):
 
+| Formato | px nel FOV | Mpx/s | bit/px @100 | @120 | @150 |
+|---------|-----------:|------:|------------:|-----:|-----:|
+| 4K 60 (3840×1920) | 1067 | 442 | 0,226 | 0,271 | 0,339 |
+| 4K 100 | 1067 | 737 | 0,136 | 0,163 | 0,203 |
+| 5.7K 60 (5760×2880) | 1600 | 995 | 0,100 | 0,121 | 0,151 |
+| **6K 60 (6016×3008)** | **1671** | 1086 | 0,092 | **0,111** | 0,138 |
+| 6K 50 | 1671 | 905 | 0,111 | 0,133 | 0,166 |
+| 7K 60 (6656×3328) | 1849 | 1329 | 0,075 | 0,090 | 0,113 |
+| **8K 30 (7680×3840)** | **2133** | 885 | 0,113 | **0,136** | 0,170 |
+| 8K 50 | 2133 | 1475 | 0,068 | 0,081 | 0,102 |
+| 8K 60 | 2133 | 1769 | 0,057 | 0,068 | 0,085 |
 
-### Step 1 — Premiere: export master ProRes 422
+**Soglia pratica: sotto ~0,09 bit/pixel si entra nella zona in cui è il contenuto
+a decidere** se il file regge o si sbriciola. Un panorama statico passa, una folla
+in movimento no.
 
-- **ProRes 422 standard** (non LT, non HQ).
-  - La sorgente X5 è H265 8-bit ~200 Mbps: nessun ProRes aggiunge dettaglio oltre.
-  - 422 standard (~1 Gbps a 5.7K60) preserva tutta l'informazione utile.
-  - 422 HQ raddoppia lo spazio disco senza guadagno visibile su sorgente 8-bit.
-  - 422 LT accettabile solo con vincolo serio di spazio (piccolo rischio sui gradienti).
-- Su M4 esce con **accelerazione hardware** (media engine ProRes dedicato): veloce.
-- Sequenza a **5760×2880 / 59.94 fps** prima di esportare (no riscalo accidentale).
-- **Non** attivare "Use Maximum Render Quality" se export = risoluzione sequenza.
+### I due punti ottimali
 
-### Step 2 — FFmpeg: codifica HEVC con accelerazione hardware (M4)
+| | scelta | perché |
+|---|---|---|
+| **Movimento, presenza "live"** | **6K 60** | 0,111 bit/px, fluidità piena, decodifica sicura |
+| **Nitidezza, scene contemplative** | **8K 30** | 0,136 bit/px — più nitido E meglio codificato del 6K60 |
 
-**Stringa di produzione (veloce, ~0.5x realtime → ~4 min per clip da 2 min):**
+L'**8K30 non è un ripiego: è la configurazione di massima qualità dell'intera
+catena.** Stessa nitidezza nel FOV dell'8K60 (2133 px), ma con *più* bit per pixel
+di quanti ne abbia un 5.7K60. L'unico motivo per non usarlo è il movimento.
+
+La scelta non è mai "quanti pixel regge la Quest". È **60 fps o nitidezza — non entrambi.**
+
+---
+
+## 2. Cosa regge davvero la Quest 3
+
+### Decodifica
+
+Lo Snapdragon XR2 Gen 2 della Quest 3 arriva, secondo i test della comunità, a:
+
+| fps | risoluzione massima |
+|----:|---------------------|
+| 30 | 8192 × 8192 |
+| 60 | 8192 × 4096 |
+| 90 | 6688 × 3344 |
+| 120 | 5792 × 2896 |
+
+**Il decoder non è il collo di bottiglia.** Anche l'8K60 rientra. Il limite è il
+bitrate necessario a riempirlo, non i pixel.
+
+> ⚠️ **Meta non pubblica specifiche ufficiali di decodifica.** Questa tabella viene
+> da test di terze parti. Trattala come ordine di grandezza, non come contratto.
+
+### Bitrate
+
+Due riferimenti che vanno tenuti distinti:
+
+- **Streaming:** Meta suggerisce 25-60 Mbps, con ~100 Mbps come massimo oltre il
+  quale compaiono stalli.
+- **File locale sideloadato** (il nostro caso nei kiosk e nelle installazioni):
+  il bitrate non passa da rete né da buffer di streaming. **120-150 Mbps sono
+  praticabili**, ed è la ragione per cui il nostro `vbv-maxrate=120000` storico
+  non era fuori scala.
+
+**Non estendere le raccomandazioni di streaming a un file su disco locale.**
+
+### Codec
+
+- **HEVC**: la scelta di riferimento. Decodifica hardware fino all'8K.
+- **AV1**: decodificato in hardware dalla Quest 3, **~30% di bitrate in meno a
+  parità di qualità**. È la leva che sbloccherebbe davvero le risoluzioni alte
+  (a 100 Mbps un 7K AV1 sta sopra un 5.7K HEVC). Due prezzi: nessuna accelerazione
+  VideoToolbox per l'encoding AV1 su Mac → tempi lunghi in CPU (`libsvtav1`);
+  e va **verificato clip per clip** che il player usato lo riproduca. Da valutare, non ancora in produzione.
+- **H.264**: solo compatibilità con hardware datato. Vedi sezione 9.
+
+---
+
+## 3. Le sorgenti — modi nativi
+
+### Insta360 X6 (attuale)
+
+File `.insv`, H.265, fino a 360 Mbps in camera, sensori 1/1,1".
+
+| modo | risoluzione | framerate disponibili |
+|------|-------------|-----------------------|
+| 8K | 7680 × 3840 | **50 / 48 / 30 / 25 / 24** |
+| 6K | 6016 × 3008 | **60** / 50 / 48 / 30 / 25 / 24 |
+| 4K | 3840 × 1920 | 100 / 60 / 50 / 48 / 30 / 25 / 24 |
+
+Profili colore: **Standard (Rec.709), Dolby Vision, I-Log**.
+
+Due cose da tenere a mente:
+
+- **Non esiste l'8K60 sulla X6.** Il massimo in 8K è 50 fps. Tutto il dibattito
+  sull'8K60 riguarda solo la Pro 2.
+- **Il 6K della X6 è 6016×3008, non 6144×3072.** Sono risoluzioni diverse:
+  scalare a 6144 è un **upscale del 2,1%** — pixel inventati e bitrate sprecato.
+  Usare sempre il preset nativo.
+
+La X6 gira nativamente entrambi i punti ottimali della sezione 1: **6K60 e 8K30.**
+Nessun ridimensionamento necessario.
+
+### Insta360 X5
+
+File `.insv`, 5.7K 5760×2880 60fps mono, H.265 8-bit ~200 Mbps.
+
+### Insta360 Pro 2
+
+File `.ins`, 8K 7680×3840 60fps mono (6 lenti). Unica sorgente con 8K60 nativo —
+e l'unico caso in cui ha senso porsi il problema (vedi sezione 5).
+
+### Step 0 — Stitching, sempre prima di tutto
+
+**I file grezzi non vanno mai dati a FFmpeg né alla GUI.**
+
+- **`.insv` (X5 / X6)**: contiene i due fisheye separati, non è ancora un 360.
+  Darlo a FFmpeg produce un singolo fisheye deformato — FFmpeg non ha la
+  calibrazione ottica Insta360.
+- **`.ins` (Pro 2)**: è un manifest di progetto da pochi KB, non il video. Punta
+  ai file delle 6 lenti più i parametri di stitch.
+
+In entrambi i casi lo stitching lo fa il **plugin Insta360** (in Premiere o in
+Insta360 Studio). L'input della nostra catena è **sempre il materiale già cucito**.
+
+---
+
+## 4. Il flusso
+
+```
+Stitching plugin Insta360
+   → Premiere (montaggio)
+   → export ProRes 422
+   → verifica colore
+   → FFmpeg (HEVC + scaling se serve)
+   → metadati 360
+   → test nel visore
+```
+
+### Perché il ProRes intermedio non è uno spreco
+
+Sembra un giro a vuoto (100 → ~1000 → 100 Mbps), ma i tre numeri non descrivono
+lo stesso contenuto: l'originale è **grezzo e non montato**, il file finale è
+**stitchato e montato**. La trasformazione pesante deve materializzarsi da qualche
+parte prima di FFmpeg.
+
+Il motivo vero è **evitare la doppia compressione**: se Premiere esportasse HEVC
+e poi FFmpeg ricomprimesse HEVC, il secondo encoder lavorerebbe sugli artefatti
+del primo e il 360 si spappola. Il ProRes rompe la catena — **una sola**
+compressione lossy seria, quella finale, con i parametri buoni.
+
+Il bitrate da solo non misura la qualità: 100 Mbps di ProRes sono scarsi,
+100 Mbps di HEVC tunato sono ottimi. Costo reale: solo spazio disco temporaneo.
+
+> La "pipe" Premiere → FFmpeg senza file intermedio **non è applicabile**:
+> Premiere è una GUI, esporta solo su file. Vale su Mac e Windows uguale.
+
+### Quale ProRes
+
+**ProRes 422 standard.** Non LT, non HQ.
+
+- 422 standard preserva tutta l'informazione utile e su M4 esce con accelerazione
+  hardware dedicata (veloce).
+- 422 HQ raddoppia lo spazio senza guadagno visibile.
+- **422 LT**: accettabile solo con vincoli seri di spazio, e **più rischioso di
+  quanto dicessero i doc vecchi** — vedi nota 10-bit qui sotto.
+
+> **Nota 10-bit (novità X6).** I documenti precedenti giustificavano il ProRes 422
+> con "la sorgente è H265 8-bit, nessun ProRes aggiunge dettaglio oltre". **Con la
+> X6 in Dolby Vision o I-Log la registrazione è 10-bit**, quindi quel ragionamento
+> non vale più. Il 422 standard resta la scelta giusta (è 10-bit), ma per un motivo
+> diverso — e il 422 LT diventa più esposto sui gradienti.
+
+Prima di esportare: sequenza impostata alla **risoluzione e al framerate nativi**
+della sorgente, per evitare riscali accidentali. Non attivare "Use Maximum Render
+Quality" se export = risoluzione sequenza.
+
+---
+
+## 5. Scegliere risoluzione e framerate
+
+**La scelta si può fare in due punti**: in export da Premiere, oppure nella GUI,
+che ora ha uno scaler lanczos. Due regole:
+
+1. **Si può solo scendere.** Scalare verso l'alto inventa pixel e spreca bitrate.
+2. **Preferire il nativo quando coincide con il target.** Uno scaling, anche in
+   discesa, costa sempre qualcosa.
+
+### Per sorgente
+
+| sorgente | movimento → | nitidezza → |
+|----------|-------------|-------------|
+| **X6** | 6K60 nativo (6016×3008) | 8K30 nativo |
+| **X5** | 5.7K60 nativo | — (8K non disponibile) |
+| **Pro 2** | 8K60 → scalare a 6K60 | 8K30 (scarto frame) o 8K60 testato |
+
+### Il caso Pro 2 8K60
+
+È l'unico materiale con 8K60 nativo, quindi scendere butta via pixel veri. Ma a
+0,068 bit/pixel il file è strozzato. Tre strade, in ordine di preferenza:
+
+1. **8K30** — se il contenuto lo consente, è la resa migliore in assoluto.
+2. **Scalare a 6K60** — fluidità piena, 0,111 bit/px, nessun rischio.
+3. **8K60 a 150-160 Mbps** — solo dopo test nel visore, con i parametri x265
+   dedicati della sezione 7.
+
+---
+
+## 6. Codifica FFmpeg — stringa di produzione
+
+### HEVC hardware (VideoToolbox) — default
+
+Veloce, ~0,5× realtime, ~4 min per clip da 2 min.
 
 ```bash
 ffmpeg -i input_prores.mov \
-  -c:v hevc_videotoolbox -profile:v main10 -b:v 100M \
+  -map 0:v:0 -map 0:a:0? \
+  -c:v hevc_videotoolbox -profile:v main10 -b:v 120M \
   -pix_fmt p010le \
-  -tag:v hvc1 \
-  -c:a aac -b:a 320k \
-  output.mp4
-```
-
-- `hevc_videotoolbox` = media engine M4. **Si aggancia all'hardware** anche a 5760 px.
-- `-tag:v hvc1` **obbligatorio**: senza, molti player su Quest non leggono lo stream.
-- 100 Mbps è un buon punto. Se nel visore compare blocking su fogliame/acqua,
-  salire a `-b:v 120M -maxrate 140M -bufsize 280M`.
-
-### Step 3 — Verifica/iniezione metadati 360
-
-VideoToolbox a volte perde i metadati spaziali. Verifica:
-
-```bash
-ffmpeg -i output.mp4 2>&1 | grep -i spherical
-```
-
-Se manca `Spherical Mapping: equirectangular`, reinietta:
-
-```bash
-exiftool -XMP-GSpherical:Spherical="true" \
-  -XMP-GSpherical:Stitched="true" \
-  -XMP-GSpherical:ProjectionType="equirectangular" \
-  output.mp4
-```
-
-Fallback rapido: **DeoVR** riconosce il 360 anche dal nome file (`_360` per mono).
-
----
-
-## 3. Come leggere l'avanzamento FFmpeg (per non confondersi)
-
-Nella riga di progress, `fps=30` è la **velocità di codifica** (frame processati
-al secondo), **non** il framerate del file finale. Il framerate reale è nello
-stream di output: `5760x2880, 59.94 fps`. Il file esce sempre a 59.94.
-
-| Encoder              | Velocità (fps) | Tempo per clip 2 min | Note                         |
-|----------------------|----------------|----------------------|------------------------------|
-| x265 `slower` (sw)   | ~0.6           | ~3,5 ore             | qualità inutile per il FOV   |
-| x265 `medium` (sw)   | ~5-8x più veloce | ~30-40 min         | max qualità ragionevole      |
-| `hevc_videotoolbox`  | ~30 (0.5x rt)  | ~4 min               | **scelta definitiva**        |
-
-Trucco per testare impostazioni senza attendere: aggiungere **`-t 15`** subito
-dopo `-i input.mov` per codificare solo 15 secondi.
-
----
-
-## 4. Massimizzare la qualità percepita nel visore
-
-### Limite fisico
-Un equirettangolare mono 5.7K avvolge 360° in orizzontale; nel FOV (~90-100°)
-la risoluzione reale è ~1600 px. Sarà sempre un po' morbido: l'obiettivo è non
-perdere pixel lungo la catena e dare alla Quest un file che decodifica fluido.
-
-### Lato visore (metà della qualità percepita si gioca qui)
-- Usare **DeoVR** o **Pigasus**, non la galleria di sistema (riproduce a risoluzione ridotta).
-- Alzare *sphere/texture resolution* o "quality" al massimo nel player.
-- Refresh Quest a **90Hz** (a 120Hz alcuni player abbassano la risoluzione di rendering).
-- Riprodurre da **file locale sideloadato**, non in streaming (lo streaming
-  reintroduce compressione e cap di bitrate).
-
-### Perché HEVC e non H264 a 200M
-- La Quest 3 ha decoder hardware **HEVC fino all'8K**; per **H264 il limite è più
-  basso** e il 5.7K60 è al confine → rischio decodifica software → stutter.
-- Spike di bitrate alti (200M) fanno scattare il 360 più del bitrate medio
-  (buffer Quest limitato). HEVC a 100M = più leggero e più sicuro da decodificare.
-- H264 hardware ha senso solo come fallback se l'HEVC hardware non si aggancia.
-
-### Risoluzione e framerate: cosa regge la Quest 3
-
-La scelta della risoluzione si fa **in export da Premiere** (il ProRes determina la
-risoluzione finale; FFmpeg/GUI non ridimensionano). Regola del decoder Quest 3
-(XR2 Gen 2): l'HEVC arriva sulla carta all'8K, ma **8K30 è il tetto pratico affidabile**.
-
-| Formato        | Nitidezza nel FOV | Fluidità | Decodifica Quest 3        | Quando                          |
-|----------------|-------------------|----------|---------------------------|---------------------------------|
-| 5.7K 60fps     | ~1600 px          | ottima   | sicura                    | movimento, presenza "live" (X5) |
-| 8K 30fps       | ~2130 px          | media    | sicura (tetto pratico)    | scene lente/contemplative       |
-| 8K 60fps       | ~2130 px          | ottima   | **a rischio stutter**     | solo da testare nel visore      |
-
-- **8K60**: da provare, non dare per scontato. Doppio limite: (1) l'encoder hardware
-  potrebbe non agganciarsi a 7680 px (test con `-t 15`); (2) anche se l'export riesce,
-  la decodifica a 8K60 può scattare nel visore proprio nei momenti di movimento.
-  Bitrate: **non 100M, ma 120-150M** (o CRF 18), altrimenti blocking.
-- Se 8K60 scatta → ripiego **8K30** (nitidezza quasi identica) o **5.7K60** (fluidità piena).
-- **Verifica sempre nel headset con la testa in movimento**, non sul monitor del Mac
-  (sul monitor sembra sempre perfetto).
-
-### Perché il ProRes intermedio NON è uno spreco (100 → ~1000 → 100 Mbps)
-
-Sembra un giro a vuoto, ma i tre "100 Mbps" non sono lo stesso contenuto:
-- l'originale è **grezzo/non montato** (X5: 2 fisheye; Pro 2: manifest+lenti);
-- il file finale è **stitchato + montato**.
-La trasformazione pesante (stitch, riproiezione, montaggio) deve materializzarsi da
-qualche parte prima di FFmpeg → è il ProRes. Serve alto e quasi-lossless per **evitare
-la doppia compressione**: se Premiere esportasse HEVC e poi FFmpeg ricomprimesse HEVC,
-il secondo encoder lavorerebbe sugli artefatti del primo (il 360 "si spappola").
-Il ProRes rompe la catena: **una sola** compressione lossy seria, quella finale con i
-parametri buoni. Il bitrate da solo non misura la qualità (100M di ProRes sono scarsi,
-100M di HEVC tunato sono ottimi). Costo reale: solo spazio disco temporaneo (~1 GB/clip),
-che si cancella dopo.
-
-> Nota: la "pipe" Premiere→FFmpeg senza file intermedio **non è applicabile**: Premiere
-> è una GUI, esporta solo su file. La pipe serve a concatenare tool da riga di comando,
-> non a saltare un export da un'app grafica. Vale su Mac e Windows uguale.
-
----
-
-## 5. Alternativa max qualità software (se non serve velocità)
-
-Se per clip specifiche si vuole la massima efficienza/qualità e si accettano
-~30-40 min a clip, x265 software con `preset medium` (NON `slower`):
-
-```bash
-ffmpeg -i input_prores.mov \
-  -c:v libx265 -preset medium -crf 16 \
-  -pix_fmt yuv420p10le \
-  -x265-params "keyint=60:min-keyint=60:bframes=3:aq-mode=3:psy-rd=2.0:psy-rdoq=1.0:sao=0:rc-lookahead=60:vbv-maxrate=120000:vbv-bufsize=240000" \
   -color_primaries bt709 -color_trc bt709 -colorspace bt709 \
   -tag:v hvc1 \
-  -c:a aac -b:a 320k \
-  output_max.mp4
+  -c:a aac -b:a 320k -ac 2 \
+  -movflags +faststart \
+  output.mp4
 ```
 
-Parametri chiave e perché:
-- `crf 16` + `vbv-maxrate=120000`: qualità altissima ma cap sui picchi (evita stutter).
-- `sao=0`: disattiva il Sample Adaptive Offset → recupera dettaglio fine (fogliame, texture).
-- `psy-rd=2.0` / `psy-rdoq=1.0`: preservano micro-contrasto e texture.
-- `aq-mode=3`: distribuisce i bit verso zone scure/uniformi (cieli, gradienti → meno banding).
-- `10-bit`: riduce il banding sui gradienti anche se la sorgente è 8-bit.
-- `keyint=60`: keyframe ogni secondo → seek fluido, meno carico sul decoder.
+Punti obbligatori:
 
-Nota: x265 (software) è più efficiente per bit di VideoToolbox (hardware). A
-parità di bitrate la qualità è migliore, ma i tempi non sono sostenibili su molte clip.
-In pratica VideoToolbox è "buono ma non bello"; `libx265 -preset fast` è il
-compromesso che torna utile quando la resa conta più della velocità.
+- **`-tag:v hvc1`** — senza, molti player su Quest non leggono lo stream.
+  Il tag `hev1` non va: è la prima cosa da verificare se un file "non si apre".
+- **`-map 0:v:0 -map 0:a:0?`** — evita che tracce timecode o dati del ProRes
+  finiscano nell'MP4, e non fallisce se la sorgente è muta.
+- **`-movflags +faststart`** — moov in testa, la Quest apre il file più in fretta.
+- I tag colore devono combaciare con la sorgente (sezione 8).
+
+Bitrate: **120 Mbps** per 6K60 e 8K30 da file locale. Salire a 140-150 se compare
+blocking su fogliame o acqua.
+
+### Ridimensionamento
+
+Quando serve scendere di risoluzione, aggiungere prima dell'encoder:
+
+```bash
+  -vf scale=6016:3008:flags=lanczos
+```
+
+Sempre 2:1 (equirettangolare): l'altezza è esattamente metà della larghezza.
 
 ---
 
-## 6. Spazio colore — il punto più delicato (HDR vs SDR)
+## 7. Alternativa software — libx265
 
-I tag colore **devono combaciare con la sorgente**, altrimenti nel visore i colori
-escono slavati o sballati. La stringa è "valida" come comando anche se i tag sono
-sbagliati: l'errore è silenzioso, si vede solo nel headset.
+Resa migliore a parità di bitrate, tempi molto più lunghi. VideoToolbox è "buono
+ma non bello"; `libx265 -preset fast` è il compromesso quando la resa conta più
+della velocità.
+
+**I parametri x265 vanno tarati sulla risoluzione.** Un'unica stringa fissa non
+funziona: il `vbv-maxrate` tarato sul 5.7K strozza tutto quello che sta sopra.
+
+### 5.7K / 6K (fino a ~1150 Mpx/s)
+
+```
+keyint=60:min-keyint=60:bframes=3:aq-mode=3:
+psy-rd=2.0:psy-rdoq=1.0:sao=0:rc-lookahead=40:
+vbv-maxrate=120000:vbv-bufsize=240000
+```
+
+### 7K / 8K (sopra ~1300 Mpx/s)
+
+```
+keyint=60:min-keyint=60:bframes=4:aq-mode=3:
+psy-rd=1.5:psy-rdoq=1.0:sao=0:rc-lookahead=25:
+vbv-maxrate=160000:vbv-bufsize=320000:
+level-idc=6.1:high-tier=1
+```
+
+Cosa cambia e perché:
+
+- **`vbv-maxrate` 160000** — 160 Mbps è il massimo che la Quest digerisce con
+  margine da storage locale. Non arriva ai ~214 Mbps che servirebbero per pareggiare
+  i bit/pixel del 5.7K, ma recupera un terzo del divario.
+- **`level-idc=6.1` + `high-tier=1`** — a 8K x265 potrebbe salire a Level 6.2, che
+  alcuni decoder hardware rifiutano. ⚠️ **Senza `high-tier=1` il Level 6.1 Main tier
+  clampa il VBV a 120 Mbps**, annullando la modifica.
+- **`psy-rd` 1.5** invece di 2.0 — con un VBV stretto, psy-rd aggressivo ruba bit
+  alle zone piatte per dare "texture", e ad alta risoluzione fa più danni che bene.
+- **`rc-lookahead` 25** invece di 40 — a 8K 10-bit il lookahead è il primo divoratore
+  di RAM.
+- **`bframes` 4** — un B-frame in più recupera efficienza, la Quest li decodifica
+  senza problemi.
+
+### Gli altri parametri, spiegati
+
+- `crf 16` — qualità altissima. **Ricorda che il VBV può impedirne il
+  raggiungimento** (sezione 1): se sei strozzato, il CRF è un desiderio, non un
+  risultato.
+- `sao=0` — disattiva il Sample Adaptive Offset: recupera dettaglio fine su
+  fogliame e texture.
+- `aq-mode=3` — distribuisce i bit verso zone scure e uniformi (cieli, gradienti →
+  meno banding).
+- `10-bit` (`yuv420p10le`) — riduce il banding sui gradienti anche da sorgente 8-bit.
+- `keyint=60` — keyframe ogni secondo: seek fluido, meno carico sul decoder.
+
+### Nota strutturale sull'equirettangolare
+
+Nell'equirettangolare **zenit e nadir sono enormemente sovracampionati**: una fetta
+consistente del bitrate finisce a codificare cielo e treppiede stirati ai poli.
+Nessun parametro x265 lo risolve. È il motivo strutturale per cui il 6K rende
+meglio del previsto rispetto all'8K.
+
+### Tempi indicativi (M4, preset fast)
+
+| risoluzione | velocità | clip da 6 min |
+|-------------|---------:|--------------:|
+| 6.6K | ~6,8 fps | ~55 min |
+| 8K | ~4-5 fps | ~80-90 min |
+
+Per testare impostazioni senza attendere: **`-t 15`** subito dopo `-i input.mov`
+codifica solo 15 secondi.
+
+> Nella riga di progress, `fps=30` è la **velocità di codifica**, non il framerate
+> del file. Il framerate reale è nello stream di output.
+
+---
+
+## 8. Spazio colore — il punto più delicato
+
+I tag colore **devono combaciare con la sorgente**. Se sbagli, la stringa FFmpeg
+è comunque "valida": l'errore è **silenzioso** e si vede solo nel visore, dove i
+colori escono slavati o sballati.
 
 Verifica cosa c'è davvero nel ProRes:
 
 ```bash
-ffmpeg -i input_prores.mov 2>&1 | grep -iE "bt2020|smpte2084|arib|bt709|color"
+ffprobe -v error -select_streams v:0 \
+  -show_entries stream=color_primaries,color_transfer,color_space \
+  -of default=noprint_wrappers=1 input_prores.mov
 ```
 
-| Cosa leggi nella sorgente        | Significato        | Tag FFmpeg da usare                                            |
-|----------------------------------|--------------------|---------------------------------------------------------------|
-| `bt709`                          | SDR                | `-color_primaries bt709 -color_trc bt709 -colorspace bt709`   |
-| `bt2020` + `smpte2084`           | HDR10 / PQ         | `-color_primaries bt2020 -color_trc smpte2084 -colorspace bt2020nc` |
-| `bt2020` + `arib-std-b67`        | HDR HLG            | `-color_primaries bt2020 -color_trc arib-std-b67 -colorspace bt2020nc` |
+| Cosa leggi | Significato | Tag FFmpeg |
+|------------|-------------|------------|
+| `bt709` | SDR | `-color_primaries bt709 -color_trc bt709 -colorspace bt709` |
+| `bt2020` + `smpte2084` | HDR10 / PQ | `-color_primaries bt2020 -color_trc smpte2084 -colorspace bt2020nc` |
+| `bt2020` + `arib-std-b67` | HDR HLG | `-color_primaries bt2020 -color_trc arib-std-b67 -colorspace bt2020nc` |
 
-Note importanti:
-- **i-Log / "flat" dell'X5 ≠ HDR**: è un profilo log SDR da sviluppare in grading;
-  l'output finale è SDR BT.709.
-- **HDR sulla Quest** è gestito ma dipende dal player (DeoVR sì, galleria di sistema
-  meno bene) e va etichettato bene. Molti, per affidabilità tra player, consegnano
-  **SDR BT.709** anche da girato HDR (tone-mapping in Premiere).
-- L'**H.264 old-style è solo 8-bit SDR**: per HDR usare sempre HEVC.
+### Dolby Vision (X6) — decisione da prendere prima di girare
+
+La X6 offre un HDR vero in camera, ma il **Dolby Vision usa metadati dinamici che
+non sopravvivono alla catena**: passando per ProRes e FFmpeg si perdono comunque.
+Due strade, da scegliere in fase di ripresa:
+
+1. **Girare Rec.709 o I-Log**, gradare in Premiere, consegnare **SDR BT.709.**
+   È la strada raccomandata: massima affidabilità tra i player Quest.
+2. **Girare Dolby Vision** sapendo che in uscita diventa al massimo **HDR10/PQ
+   statico**, da etichettare `bt2020 + smpte2084` — e da verificare nel visore,
+   perché il supporto HDR dipende dal player (DeoVR lo gestisce, la galleria di
+   sistema meno bene).
+
+Altre note:
+
+- **I-Log ≠ HDR**: è un profilo log SDR da sviluppare in grading; l'output finale
+  è SDR BT.709.
+- L'**H.264 old-style è solo 8-bit SDR**: per qualsiasi HDR serve HEVC.
+- La GUI **non fa tone-mapping HDR→SDR**: imposta i tag giusti, ma la conversione
+  va fatta in Premiere.
 
 ---
 
-## 7. H.264 old-style — opzione di compatibilità (con limiti)
+## 9. H.264 old-style — solo compatibilità
 
-Disponibile per riprodurre su player/dispositivi datati che **non** supportano HEVC.
-Per la Quest 3/3S NON è la scelta migliore.
+Per player o dispositivi datati che **non** supportano HEVC. Per la Quest 3/3S non
+è mai la scelta migliore.
 
 ```bash
 ffmpeg -i input.mov \
+  -map 0:v:0 -map 0:a:0? \
   -c:v h264_videotoolbox -b:v 200M -maxrate 200M -bufsize 100M \
   -pix_fmt yuv420p -g 60 \
   -tag:v avc1 \
-  -c:a aac -b:a 320k \
+  -c:a aac -b:a 320k -ac 2 \
+  -movflags +faststart \
   output_h264.mp4
 ```
 
-Limiti da conoscere:
-- La Quest 3 decodifica **HEVC fino all'8K**, ma per **H.264 il limite hardware è
-  più basso**: il 5.7K60 è al confine → può ricadere in decodifica software → stutter.
-- 200 Mbps è uno spike alto per il buffer limitato della Quest; `bufsize 100M` lo
-  attenua, ma il file resta pesante.
-- Solo 8-bit SDR (`yuv420p`), non adatto a sorgenti HDR.
-- **Conclusione**: usare solo per compatibilità con hardware vecchio; per la Quest
-  l'HEVC è sempre più leggero E più fluido.
+Limiti:
+
+- Il limite hardware H.264 della Quest è **più basso** di quello HEVC: il 5.7K60 è
+  al confine → rischio decodifica software → stutter.
+- 200 Mbps è uno spike alto per il buffer della Quest; `bufsize 100M` lo attenua,
+  ma il file resta pesante.
+- Solo 8-bit SDR.
 
 ---
 
-## 8. Tool GUI — `x5_quest_encoder.py`
+## 10. Metadati 360
 
-App Tkinter che automatizza tutto il flusso FFmpeg + metadati su macOS.
+### Iniezione
 
-Avvio:
+```bash
+exiftool -api LargeFileSupport=1 -overwrite_original \
+  -XMP-GSpherical:Spherical=true \
+  -XMP-GSpherical:Stitched=true \
+  -XMP-GSpherical:ProjectionType=equirectangular \
+  -XMP-GSpherical:StereoMode=mono \
+  output.mp4
+```
+
+**`-api LargeFileSupport=1` è obbligatorio.** Senza, su qualsiasi MP4 oltre i 4 GB
+exiftool fallisce con:
+
+```
+Warning: [minor] No media data
+Error: End of processing at large atom (LargeFileSupport not enabled)
+```
+
+`StereoMode`: `mono` per tutte le nostre sorgenti (X5, X6, Pro 2 sono mono).
+`top-bottom` / `left-right` solo per materiale stereoscopico vero.
+
+### ⚠️ ExifTool riscrive l'intero file
+
+Non è un'operazione di metadati leggera: **rigenera l'MP4 da capo.** Su un 360 da
+10 GB significa diversi minuti e **altrettanti GB liberi** sul volume (il doppio se
+non usi `-overwrite_original`, che tiene una copia `_original`).
+
+Se il disco si riempie a metà, resta un file **`*_exiftool_tmp`** gigante da
+cancellare a mano.
+
+### Verifica
+
+```bash
+exiftool -api LargeFileSupport=1 \
+  -XMP-GSpherical:all -CompressorID -ImageSize -VideoFrameRate \
+  -ColorPrimaries -TransferCharacteristics -MatrixCoefficients \
+  output.mp4
+```
+
+Controlla in una sola lettura i tag Spherical, il codec tag (**deve essere `hvc1`**)
+e il colore. Anche `ffmpeg -i output.mp4 2>&1 | grep -i spherical` funziona — ffmpeg
+il box `uuid` spherical lo legge — ma mostra meno.
+
+Fallback: **DeoVR** riconosce il 360 anche dal nome file (`_360` per mono).
+
+---
+
+## 11. Spazio disco — la trappola pratica
+
+Un 360 a 120 Mbps occupa **circa 0,9 GB al minuto**. Una nottata di batch riempie
+un SSD esterno senza preavviso, e quando succede:
+
+- ffmpeg muore con `No space left on device` lasciando **MP4 troncati** che occupano
+  spazio e non servono a niente;
+- exiftool lascia **`*_exiftool_tmp`** grandi quanto il file originale.
+
+Prima di lanciare un batch notturno:
+
+```bash
+df -h /Volumes/NOME_DISCO
+ls -lhS /Volumes/NOME_DISCO/ | head -20
+find /Volumes/NOME_DISCO -name "*_exiftool_tmp"
+```
+
+**Regola: servono il doppio dei GB stimati** — una volta per l'encode, una volta
+per la riscrittura di exiftool. La GUI stima e controlla entrambi (sezione 12).
+
+---
+
+## 12. Tool GUI — `x5_quest_encoder.py`
+
+App Tkinter che automatizza FFmpeg + metadati su macOS.
 
 ```bash
 python3 x5_quest_encoder.py
 ```
 
-Dipendenze (riga di comando): `ffmpeg` / `ffprobe` ed `exiftool`
+Dipendenze da riga di comando: `ffmpeg`, `ffprobe`, `exiftool`
 (`brew install ffmpeg exiftool`). Nessuna dipendenza pip.
 
-Cosa fa:
-- **Batch** di file ProRes/MOV; output `<nome>_quest.mp4` nella stessa cartella.
-- **Tre encoder**: HEVC hardware (★ default), HEVC software (x265 tuned), H.264 old-style.
-- **Bitrate auto-suggerito**: 100 Mbps per HEVC HW, 200 per H.264 (modificabile).
-- **Rileva colore dalla sorgente** (ffprobe) e imposta SDR / PQ / HLG da solo.
-- **Metadati 360** via exiftool con modalità 3D: Mono / Top-Bottom / Side-by-Side
-  (campo `XMP-GSpherical:StereoMode`). Mono per la X5 standard.
-- **Solo metadati** su un MP4 esistente (senza ricodificare) e **Verifica metadati**.
-- **Mostra comando**: anteprima dei comandi FFmpeg/exiftool (shell-quotati,
-  copia-incollabili) senza eseguirli; gli stessi comandi compaiono nel log all'avvio.
-- **Note-guida** accanto a ogni scelta + riquadro dedicato ai limiti H.264.
-- Progress reale (legge `time=` vs durata), batch e pulsante Annulla.
+**Cosa fa:**
 
-Limite noto: la GUI **non fa tone-mapping HDR→SDR**. Imposta i tag colore giusti,
-ma la conversione HDR→SDR va fatta in Premiere (o con un filtro `zscale/tonemap`
-non incluso).
+- **Batch** di file ProRes/MOV → `<nome>_quest.mp4`.
+- **Cartella di destinazione separata** — utile per scrivere su un disco diverso da
+  quello del sorgente (più veloce, e aggira il disco pieno).
+- **Tre encoder**: HEVC hardware (★ default), HEVC software x265 tuned, H.264 old-style.
+- **Ridimensionamento** con scaler lanczos, preset + larghezza personalizzata
+  (altezza sempre 2:1 automatica).
+- **Rileva il colore dalla sorgente** con ffprobe e imposta SDR / PQ / HLG da solo.
+- **Audio**: AAC stereo 320k, AAC multicanale 512k, o nessun audio.
+- **Metadati 360** via exiftool con `LargeFileSupport`, modalità Mono / TB / SBS.
+- **Solo metadati** su un MP4 esistente (senza ricodificare) — la strada per
+  recuperare un encode finito male.
+- **Verifica metadati** via exiftool, con avviso se manca lo Spherical o se il
+  codec tag non è `hvc1`.
+- **Stima spazio** dell'intero batch raggruppata per volume, senza codificare niente.
+- **Controllo preventivo dello spazio** prima di ogni file: se non ci sta, salta e
+  lo dice invece di scrivere un file troncato.
+- **Pulizia automatica** degli output incompleti dopo un errore.
+- **Mostra comando**: anteprima shell-quotata e copia-incollabile.
+- Progress reale (legge `time=` contro la durata), batch, Annulla.
+
+**Limiti noti:**
+
+- Non fa tone-mapping HDR→SDR (va fatto in Premiere).
+- Non impedisce ancora l'upscale: se scegli una risoluzione più alta della sorgente,
+  la esegue. Da usare con attenzione finché non è aggiunto il blocco.
+- Il preset "6K — 6144×3072" **non** è il 6K nativo della X6 (6016×3008).
+
+---
+
+## 13. Nel visore — metà della qualità si gioca qui
+
+- **DeoVR** o **Pigasus**, mai la galleria di sistema (riproduce a risoluzione ridotta).
+- Alzare *sphere/texture resolution* o "quality" al massimo nel player.
+- Refresh Quest a **90 Hz** — a 120 Hz alcuni player abbassano la risoluzione di
+  rendering.
+- **File locale sideloadato**, non streaming (lo streaming reintroduce compressione
+  e cap di bitrate).
+
+### Il test che conta
+
+**Verificare sempre nel visore con la testa in movimento**, su una clip difficile di
+30 secondi. Sul monitor del Mac sembra sempre perfetto. Nessuna tabella di questo
+documento sostituisce quel test.
+
+### Limite fisico da accettare
+
+Un equirettangolare mono avvolge 360° in orizzontale. Nel FOV (~100°) resta poco più
+di un quarto della larghezza: 1671 px per un 6K, 2133 px per un 8K. **Sarà sempre un
+po' morbido.** L'obiettivo non è la nitidezza assoluta, è non perdere pixel lungo la
+catena e dare alla Quest un file che decodifica fluido.
+
+---
+
+## 14. Cosa è cambiato rispetto ai documenti precedenti
+
+Per chi conosceva le versioni vecchie — correzioni sostanziali, non riscritture
+cosmetiche.
+
+**Corretto: il limite dei 5760 px.** I doc attribuivano il blocco di Media Encoder
+al fatto che "5760 px è al limite di ciò che l'encoder HEVC hardware accetta". Ma
+`hevc_videotoolbox` a 5760 px funziona, ed è lo stesso media engine: se passa da
+FFmpeg, la larghezza non era il problema. **Era Media Encoder, non VideoToolbox.**
+Di conseguenza cade anche il dubbio che "a 7680 px l'encoder hardware potrebbe non
+agganciarsi" — e comunque si verifica in 15 secondi con `-t 15`.
+
+**Corretto: `-api LargeFileSupport=1`.** Mancava in tutti i comandi exiftool dei doc
+vecchi. Su qualsiasi file oltre i 4 GB — cioè praticamente ogni 360 — l'iniezione
+falliva silenziosamente dopo l'encode.
+
+**Corretto: l'8K30 non è un ripiego.** I doc lo davano come "alternativa per scene
+lente". È invece la configurazione di massima qualità dell'intera catena (sezione 1).
+
+**Corretto: il VBV va tarato sulla risoluzione.** La stringa x265 unica con
+`vbv-maxrate=120000` strozzava silenziosamente tutto sopra il 6K, trasformando un
+"CRF 16" in "120 Mbps forzati".
+
+**Aggiornato: la risoluzione non si decide più solo in Premiere.** I doc dicevano
+che "FFmpeg/GUI non ridimensionano". La GUI ora ha lo scaler lanczos.
+
+**Aggiornato: la X6 e il 10-bit.** Nuova sorgente, nuovi modi nativi, Dolby Vision,
+e la premessa "sorgente 8-bit" che non vale più per il ProRes.
+
+**Ridimensionato: `rc-lookahead`.** I doc usavano 60, la GUI 40, e a 8K conviene 25.
+Allineato per fascia di risoluzione nella sezione 7.
 
 ---
 
 ## TL;DR
 
-1. **Stitch nel plugin Insta360** (X5 `.insv` o Pro 2 `.ins`) → mai il grezzo a FFmpeg.
-2. **Premiere → ProRes 422** (standard); la risoluzione di export decide 5.7K/8K.
-3. **Verifica colore** sulla sorgente (`grep` bt709 vs bt2020) e imposta i tag giusti.
-4. **FFmpeg → `hevc_videotoolbox` `-b:v 100M` (`120-150M` per 8K) `-profile:v main10` `-tag:v hvc1`**;
-   oppure `libx265 -preset fast` per resa migliore.
-5. **Check/inietta metadati 360** (`grep spherical`, `exiftool` con StereoMode; Mono per X5 e Pro 2).
-6. **Nel visore**: DeoVR/Pigasus, quality al max, 90Hz, file locale. 8K60 → testa in movimento.
-7. HEVC > H264 sulla Quest (decodifica più sicura, file più leggero).
-8. Per automatizzare tutto: **`x5_quest_encoder.py`**.
+1. **Stitch nel plugin Insta360** (`.insv` X5/X6, `.ins` Pro 2) — mai il grezzo a FFmpeg.
+2. **Premiere → ProRes 422 standard**, sequenza alla risoluzione nativa.
+3. **Scegli il target**: **6K60** per il movimento, **8K30** per la nitidezza.
+   Sulla X6 sono entrambi nativi. Solo in discesa, mai upscale.
+4. **Verifica il colore** della sorgente e imposta i tag giusti. Con Dolby Vision,
+   decidi *prima di girare*.
+5. **FFmpeg** → `hevc_videotoolbox -b:v 120M -profile:v main10 -tag:v hvc1`,
+   oppure `libx265 -preset fast` con i parametri della **fascia giusta** (sezione 7).
+6. **Metadati** → `exiftool -api LargeFileSupport=1` + verifica del tag `hvc1`.
+   Tieni libero il doppio dello spazio.
+7. **Nel visore**: DeoVR/Pigasus, quality al max, 90 Hz, file locale,
+   **testa in movimento**.
+8. Per automatizzare: **`x5_quest_encoder.py`**.
+
+---
+
+## Fonti e livello di affidabilità
+
+**Verificato su documentazione ufficiale:**
+[Insta360 X6 — specifiche prodotto](https://www.insta360.com/specs/x6)
+
+**Test di terze parti, da trattare come ordine di grandezza** (Meta non pubblica
+specifiche ufficiali di decodifica):
+[explorations360 — Meta Quest 3 360° Video Encoding](https://explorations360.com/en/academy/meta-quest-3) ·
+[Bitmovin — Encoding VR and 360 Immersive Video for Meta Quest](https://bitmovin.com/blog/best-encoding-settings-meta-vr-360-headsets/)
+
+**Calcolato** (aritmetica su risoluzione × framerate ÷ bitrate): tutte le tabelle
+bit/pixel. Sono matematica, non misure di qualità percepita.
+
+**Da verificare sul campo**: ogni soglia di "regge / non regge". L'unico test valido
+è la clip difficile di 30 secondi nel visore, con la testa in movimento.
