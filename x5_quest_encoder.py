@@ -31,6 +31,10 @@ X265_PARAMS = (
     "vbv-maxrate=120000:vbv-bufsize=240000"
 )
 
+# Tetto di bitrate imposto dal VBV sopra (kbps -> Mbps): serve per stimare
+# la dimensione massima dell'output in modalità CRF.
+X265_VBV_MAXRATE_MBPS = 120
+
 # Risoluzioni output (equirettangolari 2:1). None = mantieni originale.
 RESOLUTIONS = {
     "Originale (nessun ridimensionamento)": None,
@@ -93,11 +97,22 @@ def human_gb(n):
     return f"{n / 1e9:.1f} GB"
 
 
+def free_space(path):
+    """Byte liberi sul volume che contiene path (o la sua cartella padre)."""
+    p = os.path.abspath(path)
+    if not os.path.isdir(p):
+        p = os.path.dirname(p) or "."
+    try:
+        return shutil.disk_usage(p).free
+    except Exception:
+        return None
+
+
 class EncoderApp:
     def __init__(self, root):
         self.root = root
         root.title(APP_TITLE)
-        root.geometry("860x780")
+        root.geometry("880x820")
         root.minsize(720, 560)
 
         self.proc = None
@@ -113,7 +128,7 @@ class EncoderApp:
     def _hint(self, parent, text, **grid):
         """Etichetta-guida grigia sotto un controllo."""
         lbl = ttk.Label(parent, text=text, foreground="#7a7a7a",
-                        font=("", 10), wraplength=780, justify="left")
+                        font=("", 10), wraplength=800, justify="left")
         if grid:
             lbl.grid(**grid)
         else:
@@ -140,6 +155,8 @@ class EncoderApp:
         self.btn_run.pack(side="left", padx=6)
         self.btn_preview = ttk.Button(frm_act, text="⌗  Mostra comando", command=self.preview_cmd)
         self.btn_preview.pack(side="left", padx=6)
+        self.btn_check = ttk.Button(frm_act, text="◷  Stima spazio", command=self.check_space)
+        self.btn_check.pack(side="left", padx=6)
         self.btn_cancel = ttk.Button(frm_act, text="■  Annulla", command=self.cancel, state="disabled")
         self.btn_cancel.pack(side="left", padx=6)
         self.progress = ttk.Progressbar(frm_act, mode="determinate", maximum=100)
@@ -180,7 +197,37 @@ class EncoderApp:
         ttk.Button(btn_col, text="Rimuovi", command=self.remove_selected).pack(fill="x", pady=2)
         ttk.Button(btn_col, text="Svuota", command=self.clear_files).pack(fill="x", pady=2)
         self._hint(frm_in, "→ Usa il master ProRes 422 esportato da Premiere, non l'MP4 della camera. "
-                           "L'output esce nella stessa cartella con suffisso _quest.mp4. Più file = batch.")
+                           "Più file = batch. L'output esce con suffisso _quest.mp4 nella cartella scelta qui sotto.")
+
+        # --- Destinazione ---
+        frm_out = ttk.LabelFrame(self.body, text="Cartella di destinazione")
+        frm_out.pack(fill="x", **pad)
+        row_out = ttk.Frame(frm_out)
+        row_out.pack(fill="x")
+        self.same_folder = tk.BooleanVar(value=True)
+        ttk.Checkbutton(row_out, text="Accanto al sorgente",
+                        variable=self.same_folder,
+                        command=self._sync_out_widgets).pack(side="left", padx=6, pady=6)
+        self.out_dir = tk.StringVar(value="")
+        self.ent_out = ttk.Entry(row_out, textvariable=self.out_dir, state="disabled")
+        self.ent_out.pack(side="left", fill="x", expand=True, padx=6)
+        self.btn_out = ttk.Button(row_out, text="Scegli…", command=self.pick_out_dir, state="disabled")
+        self.btn_out.pack(side="left", padx=6)
+
+        row_free = ttk.Frame(frm_out)
+        row_free.pack(fill="x")
+        self.lbl_free = ttk.Label(row_free, text="Spazio libero: —", foreground="#444")
+        self.lbl_free.pack(side="left", padx=6, pady=(0, 6))
+        ttk.Button(row_free, text="Aggiorna", command=self.refresh_free).pack(side="left", padx=6, pady=(0, 6))
+
+        self.ignore_space = tk.BooleanVar(value=False)
+        ttk.Checkbutton(frm_out, text="Ignora il controllo dello spazio (sconsigliato)",
+                        variable=self.ignore_space).pack(anchor="w", padx=6)
+        self._hint(frm_out, "→ Un 360 a 8K in ProRes consuma decine di GB e l'output HEVC può arrivare a diversi GB per "
+                            "minuto. Se il volume del sorgente è pieno, punta la destinazione su un altro disco: "
+                            "lavorare in lettura da un disco e in scrittura su un altro è anche più veloce. "
+                            "Prima di ogni file la GUI stima l'output e si ferma se non ci sta, invece di scrivere "
+                            "un MP4 troncato.")
 
         # --- Encoder ---
         frm_enc = ttk.LabelFrame(self.body, text="Encoder")
@@ -213,7 +260,8 @@ class EncoderApp:
         self.spn_crf = ttk.Spinbox(frm_enc, from_=10, to=28, textvariable=self.crf, width=6)
         self.spn_crf.grid(row=4, column=3, sticky="w", padx=6, pady=2)
         self._hint(frm_enc, "→ Preset: 'fast' ottimo compromesso, 'medium' un filo meglio, 'slower' inutile per il 360 "
-                            "(ore di attesa). CRF: 16 = altissima qualità; più basso (14) = più pesante, più alto (18-20) = più leggero.",
+                            "(ore di attesa). CRF: 16 = altissima qualità; più basso (14) = più pesante, più alto (18-20) = più leggero. "
+                            "In CRF la dimensione finale non è prevedibile: la stima usa il tetto VBV (120 Mbps), quindi è prudenziale.",
                    row=5, column=0, columnspan=4, sticky="w", padx=6)
 
         # bitrate (hardware HEVC e H264)
@@ -223,7 +271,7 @@ class EncoderApp:
         self.spn_br.grid(row=6, column=1, sticky="w", padx=6, pady=2)
         self._hint(frm_enc, "→ Per HEVC HW: 100 Mbps su paesaggi (120-140 se vedi blocchi su acqua/foglie). "
                             "Per H.264 old-style: 200 Mbps è il valore classico Quest. Cambiando encoder il valore "
-                            "consigliato si imposta da solo.",
+                            "consigliato si imposta da solo. Promemoria: 100 Mbps = circa 0,75 GB al minuto.",
                    row=7, column=0, columnspan=4, sticky="w", padx=6)
 
         # --- Riquadro limiti H.264 ---
@@ -321,10 +369,17 @@ class EncoderApp:
 
         self._sync_enc_widgets()
         self._sync_res_widgets()
+        self._sync_out_widgets()
 
     def _sync_res_widgets(self):
         is_custom = RESOLUTIONS.get(self.resolution.get()) == "custom"
         self.spn_w.config(state="normal" if is_custom else "disabled")
+
+    def _sync_out_widgets(self):
+        same = self.same_folder.get()
+        self.ent_out.config(state="disabled" if same else "normal")
+        self.btn_out.config(state="disabled" if same else "normal")
+        self.refresh_free()
 
     def _sync_enc_widgets(self):
         enc = self.encoder.get()
@@ -374,6 +429,7 @@ class EncoderApp:
         for p in paths:
             if p not in self.lst_files.get(0, "end"):
                 self.lst_files.insert("end", p)
+        self.refresh_free()
 
     def remove_selected(self):
         for i in reversed(self.lst_files.curselection()):
@@ -381,6 +437,88 @@ class EncoderApp:
 
     def clear_files(self):
         self.lst_files.delete(0, "end")
+
+    def pick_out_dir(self):
+        d = filedialog.askdirectory(title="Cartella di destinazione")
+        if d:
+            self.out_dir.set(d)
+            self.refresh_free()
+
+    # ----------------------------------------------------------- spazio
+    def dest_for(self, src):
+        """Percorso dell'MP4 di output per un dato sorgente."""
+        base = os.path.splitext(os.path.basename(src))[0] + "_quest.mp4"
+        if self.same_folder.get() or not self.out_dir.get().strip():
+            return os.path.join(os.path.dirname(src), base)
+        return os.path.join(self.out_dir.get().strip(), base)
+
+    def dest_root(self):
+        """Cartella su cui misurare lo spazio libero (o None se dipende dal sorgente)."""
+        if self.same_folder.get():
+            files = self.lst_files.get(0, "end")
+            return os.path.dirname(files[0]) if files else None
+        return self.out_dir.get().strip() or None
+
+    def refresh_free(self):
+        root = self.dest_root()
+        if not root or not os.path.isdir(root):
+            self.lbl_free.config(text="Spazio libero: —", foreground="#444")
+            return
+        free = free_space(root)
+        if free is None:
+            self.lbl_free.config(text="Spazio libero: non rilevabile", foreground="#444")
+            return
+        color = "#b00" if free < 20e9 else ("#a60" if free < 60e9 else "#060")
+        self.lbl_free.config(text=f"Spazio libero su {root}: {human_gb(free)}", foreground=color)
+
+    def estimate_output(self, dur):
+        """Stima prudenziale dei byte dell'MP4 di output."""
+        if not dur:
+            return None
+        enc = self.encoder.get()
+        if enc == "sw":
+            mbps = X265_VBV_MAXRATE_MBPS      # tetto VBV: caso peggiore in CRF
+        else:
+            try:
+                mbps = float(self.bitrate.get().strip() or "100")
+            except ValueError:
+                mbps = 100.0
+        mode = AUDIO_MODES.get(self.audio.get(), "stereo")
+        mbps += {"stereo": 0.32, "multi": 0.52, "none": 0.0}[mode]
+        return dur * mbps * 1e6 / 8 * 1.02     # +2% di overhead contenitore
+
+    def check_space(self):
+        """Stima l'occupazione del batch senza codificare nulla."""
+        files = list(self.lst_files.get(0, "end"))
+        if not files:
+            messagebox.showinfo(APP_TITLE, "Aggiungi almeno un file.")
+            return
+
+        def _do():
+            self.log("\n========== STIMA SPAZIO ==========\n")
+            per_volume = {}
+            for src in files:
+                dur = ffprobe_duration(src)
+                est = self.estimate_output(dur)
+                dst = self.dest_for(src)
+                folder = os.path.dirname(dst) or "."
+                if est is None:
+                    self.log(f"{os.path.basename(src)}: durata non leggibile, stima impossibile\n")
+                    continue
+                per_volume[folder] = per_volume.get(folder, 0) + est
+                self.log(f"{os.path.basename(src)}: {dur/60:.1f} min → max ~{human_gb(est)}\n")
+            self.log("\n")
+            for folder, need in per_volume.items():
+                free = free_space(folder)
+                if free is None:
+                    self.log(f"{folder}: spazio non rilevabile\n")
+                    continue
+                verdict = "OK" if free >= need * 1.05 else "INSUFFICIENTE"
+                self.log(f"{folder}\n   serve ~{human_gb(need)} · liberi {human_gb(free)} → {verdict}\n")
+            self.log("==================================\n")
+            self.root.after(0, self.refresh_free)
+
+        threading.Thread(target=_do, daemon=True).start()
 
     # -------------------------------------------------- color detection
     def detect_color(self):
@@ -510,8 +648,7 @@ class EncoderApp:
             return
         self.log("\n========== ANTEPRIMA COMANDI (non eseguiti) ==========\n")
         for src in files:
-            base, _ = os.path.splitext(src)
-            dst = base + "_quest.mp4"
+            dst = self.dest_for(src)
             self.log(f"\n# {os.path.basename(src)}\n")
             self.log(cmd_to_str(self.build_cmd(src, dst)) + "\n")
             if self.inject_meta.get():
@@ -526,6 +663,11 @@ class EncoderApp:
         if not which("ffmpeg"):
             messagebox.showerror(APP_TITLE, "ffmpeg non trovato. brew install ffmpeg")
             return
+        if not self.same_folder.get():
+            d = self.out_dir.get().strip()
+            if not d or not os.path.isdir(d):
+                messagebox.showerror(APP_TITLE, "Cartella di destinazione non valida.")
+                return
         self.cancel_flag.clear()
         self.btn_run.config(state="disabled")
         self.btn_cancel.config(state="normal")
@@ -533,19 +675,53 @@ class EncoderApp:
         self.worker.start()
 
     def _run_batch(self, files):
+        done, failed, skipped = 0, 0, 0
         for idx, src in enumerate(files, 1):
             if self.cancel_flag.is_set():
                 break
-            base, _ = os.path.splitext(src)
-            dst = base + "_quest.mp4"
+            dst = self.dest_for(src)
             self.log(f"\n=== [{idx}/{len(files)}] {os.path.basename(src)} ===\n")
             self._set_status(f"Encoding {idx}/{len(files)}")
+
+            if not self._space_ok(src, dst):
+                skipped += 1
+                continue
+
             ok = self._encode(src, dst)
-            if ok and self.inject_meta.get() and not self.cancel_flag.is_set():
+            if not ok:
+                failed += 1
+                continue
+            if self.inject_meta.get() and not self.cancel_flag.is_set():
                 self._inject(dst)
+            done += 1
+
         self._set_status("Pronto")
         self._reset_buttons()
-        self.log("\n--- Fine ---\n")
+        self.root.after(0, self.refresh_free)
+        self.log(f"\n--- Fine: {done} completati, {failed} falliti, {skipped} saltati ---\n")
+
+    def _space_ok(self, src, dst):
+        """Controllo preventivo dello spazio sulla destinazione."""
+        folder = os.path.dirname(os.path.abspath(dst)) or "."
+        if not os.path.isdir(folder):
+            self.log(f"[ERRORE] cartella di destinazione inesistente: {folder}\n")
+            return False
+        free = free_space(folder)
+        dur = ffprobe_duration(src)
+        est = self.estimate_output(dur)
+        if free is None or est is None:
+            self.log("[spazio] impossibile stimare, procedo comunque.\n")
+            return True
+        self.log(f"[spazio] stima output max ~{human_gb(est)} · liberi {human_gb(free)}\n")
+        if free >= est * 1.05:
+            return True
+        if self.ignore_space.get():
+            self.log("[spazio] soglia superata ma il controllo è disattivato: procedo.\n")
+            return True
+        self.log(f"[SALTATO] servono ~{human_gb(est * 1.05)} su {folder}, "
+                 f"disponibili {human_gb(free)}.\n"
+                 f"          Libera spazio o scegli un'altra cartella di destinazione.\n")
+        return False
 
     def _encode(self, src, dst):
         dur = ffprobe_duration(src)
@@ -561,11 +737,16 @@ class EncoderApp:
             return False
 
         time_re = re.compile(r"time=(\d+):(\d+):(\d+\.\d+)")
+        disk_full = False
+        aborted = False
         for line in self.proc.stdout:
+            if "No space left on device" in line:
+                disk_full = True
             if self.cancel_flag.is_set():
                 self.proc.terminate()
                 self.log("\n[annullato]\n")
-                return False
+                aborted = True
+                break
             m = time_re.search(line)
             if m and dur:
                 h, mn, s = m.groups()
@@ -580,11 +761,30 @@ class EncoderApp:
         rc = self.proc.returncode
         self.proc = None
         self._set_progress(100)
-        if rc == 0 and os.path.exists(dst) and os.path.getsize(dst) > 0:
+
+        if not aborted and rc == 0 and os.path.exists(dst) and os.path.getsize(dst) > 0:
             self.log(f"[OK] {dst}  ({human_gb(os.path.getsize(dst))})\n")
             return True
+
+        if disk_full:
+            self.log("[ERRORE] Disco pieno durante la scrittura. "
+                     "Il controllo preventivo aveva stimato meno di quanto serve, "
+                     "oppure altro ha occupato spazio nel frattempo.\n")
         self.log(f"[FFmpeg uscito con codice {rc}]\n")
+        self._cleanup_partial(dst)
         return False
+
+    def _cleanup_partial(self, dst):
+        """Rimuove l'MP4 troncato lasciato da un encode fallito: è inutilizzabile
+        e su un 360 può occupare parecchi GB."""
+        try:
+            if os.path.exists(dst):
+                size = os.path.getsize(dst)
+                os.remove(dst)
+                self.log(f"[pulizia] rimosso output incompleto ({human_gb(size)}): "
+                         f"{os.path.basename(dst)}\n")
+        except Exception as e:
+            self.log(f"[pulizia] non sono riuscito a rimuovere {dst}: {e}\n")
 
     # ------------------------------------------------------- metadati
     def _inject(self, path):
@@ -599,17 +799,14 @@ class EncoderApp:
 
         size = os.path.getsize(path)
         folder = os.path.dirname(os.path.abspath(path)) or "."
-        try:
-            free = shutil.disk_usage(folder).free
-        except Exception:
-            free = None
+        free = free_space(folder)
         # exiftool scrive un temporaneo delle stesse dimensioni; senza backup
         # serve ~1x il file, con backup ~2x.
         needed = size * (1.1 if self.overwrite_meta.get() else 2.1)
         if free is not None and free < needed:
             self.log(f"[ERRORE metadati] spazio insufficiente su {folder}: "
                      f"servono ~{human_gb(needed)}, disponibili {human_gb(free)}.\n"
-                     f"           Libera spazio oppure sposta il file su un altro disco.\n")
+                     f"           Libera spazio, poi usa 'Solo metadati su MP4 esistente…'.\n")
             return False
 
         cmd = self.exiftool_cmd(path)
@@ -627,7 +824,8 @@ class EncoderApp:
             for line in self.proc.stdout:
                 if self.cancel_flag.is_set():
                     self.proc.terminate()
-                    self.log("\n[metadati annullati — il file potrebbe essere incompleto]\n")
+                    self.log("\n[metadati annullati — controlla che non resti un file "
+                             "*_exiftool_tmp accanto all'originale]\n")
                     return False
                 self.log(line)
             self.proc.wait()
@@ -643,7 +841,8 @@ class EncoderApp:
         if rc == 0:
             self.log("[metadati OK]\n")
             return True
-        self.log(f"[ERRORE metadati] exiftool uscito con codice {rc}\n")
+        self.log(f"[ERRORE metadati] exiftool uscito con codice {rc}. "
+                 f"Se il disco si è riempito, cerca e cancella *_exiftool_tmp.\n")
         return False
 
     # --------------------------------------------------- meta-only ops
@@ -663,6 +862,7 @@ class EncoderApp:
         def _do():
             self._inject(path)
             self._reset_buttons()
+            self.root.after(0, self.refresh_free)
 
         threading.Thread(target=_do, daemon=True).start()
 
