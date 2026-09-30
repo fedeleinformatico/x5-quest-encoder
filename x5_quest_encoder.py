@@ -31,9 +31,11 @@ APP_TITLE = "X5 → Quest Encoder"
 # Parametri x265 tarati per fascia di carico (pixel al secondo), vedi sezione 7
 # del workflow: una stringa unica con vbv-maxrate=120000 strozza tutto quello
 # che sta sopra il 6K60.
+# {kf} = keyframe ogni secondo, calcolato dal framerate del sorgente (60 a 60p,
+# 50 a 50p): un keyint fisso a 60 su un 8K50 sposta i keyframe a 1,2 s.
 # Fascia bassa: 5.7K60, 6K60, 8K30 (fino a ~1150 Mpx/s).
 X265_PARAMS_STD = (
-    "keyint=60:min-keyint=60:bframes=3:aq-mode=3:"
+    "keyint={kf}:min-keyint={kf}:bframes=3:aq-mode=3:"
     "psy-rd=2.0:psy-rdoq=1.0:sao=0:rc-lookahead=40:"
     "vbv-maxrate=120000:vbv-bufsize=240000"
 )
@@ -41,7 +43,7 @@ X265_PARAMS_STD = (
 # x265 sceglie da solo Level 6.1 High tier per l'8K60 a 160 Mbps, mentre
 # level-idc=6.1 rifiuta i frame più grandi (Pro 2 3D TB 7680×7680).
 X265_PARAMS_HIGH = (
-    "keyint=60:min-keyint=60:bframes=4:aq-mode=3:"
+    "keyint={kf}:min-keyint={kf}:bframes=4:aq-mode=3:"
     "psy-rd=1.5:psy-rdoq=1.0:sao=0:rc-lookahead=25:"
     "vbv-maxrate=160000:vbv-bufsize=320000"
 )
@@ -707,6 +709,12 @@ class EncoderApp:
         w, h = self._scale_plan(src)[0] or (sw, sh)
         return "high" if w * h * fps > X265_HIGH_THRESHOLD else "std"
 
+    def _keyint(self, src):
+        """Keyframe ogni secondo: arrotonda il framerate del sorgente (60 se ignoto)."""
+        info = ffprobe_video(src)
+        fps = info[2] if info else 0
+        return max(1, round(fps)) if 1 <= fps <= 240 else 60
+
     def _out_size(self, src):
         """(w, h) del video in uscita, o None se il sorgente non è leggibile."""
         res = self._scale_plan(src)[0]
@@ -746,21 +754,22 @@ class EncoderApp:
                 cmd += ["-c:v", "h264_videotoolbox"]
             cmd += ["-b:v", f"{br}M", "-maxrate", f"{br}M",
                     "-bufsize", f"{max(50, int(float(br) / 2))}M",
-                    "-pix_fmt", "yuv420p", "-g", "60"]
+                    "-pix_fmt", "yuv420p", "-g", str(self._keyint(src))]
             tag = "avc1"
         elif enc == "av1":
             # SVT-AV1 accetta solo CRF sopra i 100 Mbps: -b:v 0 disattiva l'ABR.
             cmd += ["-c:v", "libsvtav1", "-preset", self.preset.get(),
                     "-crf", self.crf.get().strip() or AV1_DEFAULT_CRF, "-b:v", "0",
                     "-pix_fmt", "yuv420p10le",
-                    "-svtav1-params", "keyint=60"]
+                    "-svtav1-params", f"keyint={self._keyint(src)}"]
             tag = None
         else:
             cmd += ["-c:v", "libx265", "-preset", self.preset.get(),
                     "-crf", self.crf.get().strip() or "16",
                     "-pix_fmt", "yuv420p10le",
                     "-x265-params",
-                    X265_PARAMS_HIGH if self._x265_tier(src) == "high" else X265_PARAMS_STD]
+                    (X265_PARAMS_HIGH if self._x265_tier(src) == "high"
+                     else X265_PARAMS_STD).format(kf=self._keyint(src))]
             tag = "hvc1"
 
         cmd += COLOR_TAGS[self.color.get()]

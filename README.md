@@ -26,9 +26,11 @@ Homebrew con `brew install python-tk`).
 ## Cosa fa
 
 - **Batch** di file ProRes/MOV → `<nome>_quest.mp4`, anche su un disco diverso.
-- **Tre encoder**: HEVC hardware VideoToolbox (default, 120 Mbps), HEVC software
-  libx265 con parametri tarati per fascia di risoluzione, H.264 per compatibilità
-  (VideoToolbox fino a 4096 px, libx264 oltre).
+- **Quattro encoder**: **AV1** (libsvtav1 — la scelta migliore per l'8K: qualità
+  di un HEVC a 200 Mbps usandone 130, decodifica hardware sulla Quest 3), HEVC
+  hardware VideoToolbox (il più veloce), HEVC software libx265 con parametri
+  tarati per fascia di risoluzione, H.264 per compatibilità (VideoToolbox fino a
+  4096 px, libx264 oltre).
 - **Ridimensionamento** lanczos con i preset nativi (8K, 6K 6016×3008, 5.7K) —
   solo verso il basso, l'upscale viene bloccato. Supporta anche lo stereo
   top-bottom (1:1, es. Pro 2 3D) e side-by-side.
@@ -52,9 +54,10 @@ In breve:
 1. Stitch con i tool Insta360 (plugin/Studio, Stitcher per la Pro 2) — mai dare
    il materiale grezzo a FFmpeg.
 2. Premiere → **ProRes 422** alla risoluzione nativa.
-3. **6K60** (5.7K60 sulla X5) per il movimento, **8K30** per la nitidezza. Mai upscale.
+3. **Risoluzione e framerate nativi**, mai upscale. Non scendere a 30 fps: nel
+   visore, in movimento, è inguardabile.
 4. Verifica il colore della sorgente.
-5. HEVC `-tag:v hvc1`, metadati con `exiftool -api LargeFileSupport=1`.
+5. AV1 a CRF 28, o HEVC `-tag:v hvc1`; metadati con `exiftool -api LargeFileSupport=1`.
 6. Prova nel visore (DeoVR / Pigasus), con la testa in movimento.
 
 ## Storia
@@ -69,9 +72,10 @@ git log --oneline -- x5_quest_encoder.py
 ## Verifiche
 
 Comandi e limiti tecnici della guida sono stati provati su Mac M4 con FFmpeg 8.1,
-x265 4.2 ed exiftool 12.85; le specifiche delle camere vengono dalle pagine
-Insta360. Le soglie di "regge / non regge" nel visore restano da confermare con
-le proprie clip.
+x265 4.2, SVT-AV1 4.1 ed exiftool 12.85, con confronti VMAF su master ProRes 8K
+reali; le specifiche delle camere vengono dalle pagine Insta360. Le scelte sono
+poi state verificate su Meta Quest 3 con clip da 60 s: è così che AV1 è stato
+promosso e il 30 fps bocciato (sezione 14 della guida).
 
 ## Licenza
 

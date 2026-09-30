@@ -63,14 +63,18 @@ in movimento no.
 
 | | scelta | perché |
 |---|---|---|
-| **Movimento, presenza "live"** | **6K 60** | 0,111 bit/px, fluidità piena, decodifica sicura |
-| **Nitidezza, scene contemplative** | **8K 30** | 0,136 bit/px — più nitido E meglio codificato del 6K60 |
+| **Qualsiasi ripresa in movimento** | **8K a 50-60 fps** | il framerate non è negoziabile nel visore |
+| **Solo scene statiche** (treppiede, interni) | 8K 30 | 0,136 bit/px, il massimo per fotogramma |
 
-L'**8K30 non è un ripiego: è la configurazione di massima qualità dell'intera
-catena.** Stessa nitidezza nel FOV dell'8K60 (2133 px), ma con *più* bit per pixel
-di quanti ne abbia un 5.7K60. L'unico motivo per non usarlo è il movimento.
+> ⚠️ **L'8K30 in movimento è inguardabile.** Sulla carta è la configurazione
+> migliore — 0,136 bit/px, il doppio dei bit per fotogramma di un 8K60 — e le
+> misure oggettive lo premiano (VMAF 98,3 contro 94,8, sezione 14). **Nel visore
+> con una ripresa in volo è stato bocciato senza appello.** Nel 360 la testa si
+> muove sempre, quindi il giudizio di una metrica su un fotogramma fermo non
+> vale niente: 30 fps vanno bene solo su una camera immobile.
 
-La scelta non è mai "quanti pixel regge la Quest". È **60 fps o nitidezza — non entrambi.**
+La scelta quindi **non** è "60 fps o nitidezza". È: si tiene il framerate nativo,
+e la nitidezza si compra con **il codec** (sezione 14), non col framerate.
 
 ---
 
@@ -246,12 +250,16 @@ che ora ha uno scaler lanczos. Due regole:
 
 ### Per sorgente
 
-| sorgente | movimento → | nitidezza → |
-|----------|-------------|-------------|
-| **X6** | 6K60 nativo (6016×3008) | 8K30 nativo |
-| **X5** | 5.7K60 nativo | 8K30 nativo |
-| **Pro 2** | 8K60 → scalare a 6K60 | 8K30 (scarto frame) o 8K60 testato |
-| **Pro 2 3D** | 6K 3D 60 | 8K 3D 30 (7680×7680 TB) |
+Il criterio, dopo le prove nel visore: **tenere risoluzione e framerate nativi**,
+e spendere sul codec. Scendere di risoluzione o di framerate si giustifica solo
+se il file non si riproduce.
+
+| sorgente | scelta | note |
+|----------|--------|------|
+| **X6** | **8K50 nativo** (7680×3840) | 50 fps danno il 17% di bit per fotogramma in più di un 8K60 |
+| **X5** | 5.7K60, oppure 8K30 **solo da treppiede** | non ha un 8K a 50/60 |
+| **Pro 2** | 8K60 nativo | serve bitrate: vedi sezione 14 |
+| **Pro 2 3D** | 8K 3D 30 (7680×7680 TB) | il 3D a 30 fps è un compromesso imposto dalla camera |
 
 ### Il caso Pro 2 8K60
 
@@ -652,15 +660,15 @@ SVT-AV1 4.1.
 | AV1 preset 8, CRF 24 | 177 | 96,6 | 93,3 | ~25 min |
 | x265 `slow`, CRF 12 (senza tetto) | 345 | 98,6 | 96,7 | — |
 
-### Le tre leve, in ordine di efficacia
+### Le leve, in ordine di efficacia reale
 
-1. **Il framerate.** Lo stesso 8K a **30 fps** e 120 Mbps arriva a **98,3**
-   contro 94,8 a 60 fps: ogni fotogramma riceve il doppio dei bit. È il salto
-   più grande disponibile, e si paga solo in fluidità del movimento.
-2. **Il codec.** AV1 a 122 Mbps = HEVC hardware a 206 Mbps. Stessa qualità,
-   **40% di bitrate in meno**, e sei volte più veloce di x265 `slow`.
-3. **Il bitrate.** Su 8K60 non c'è saturazione: si guadagna fino a 345 Mbps.
-   Se il file è destinato al visore, il tetto lo mette la Quest, non la curva.
+1. **Il codec.** AV1 a 122 Mbps = HEVC hardware a 206 Mbps. Stessa qualità,
+   **40% di bitrate in meno**, e sei volte più veloce di x265 `slow`. È la leva
+   che funziona anche nel visore, non solo nelle misure.
+2. **Il bitrate, fino a ~130 Mbps.** Oltre, le misure salgono ma l'occhio non
+   distingue più (verifica qui sotto). Sotto, si vede eccome.
+3. **Il framerate: da non toccare.** Sulla carta scendere a 30 fps è il salto più
+   grande (VMAF 98,3), nella pratica rende il file inutilizzabile in movimento.
 
 ### Risoluzione: 8K60 contro 6K60, stesso bitrate
 
@@ -673,13 +681,36 @@ Con un encoder efficiente l'8K resta avanti anche strozzato. Con l'hardware si
 inverte. Da qui la regola pratica: **se codifichi in hardware, scendere a 6K ha
 senso; se codifichi in x265 o AV1, tieni l'8K.**
 
+### Verifica nel visore (Quest 3, file locale, clip da 60 s)
+
+Le stesse codifiche, guardate in cuffia con la testa in movimento. È qui che due
+conclusioni delle metriche sono state ribaltate:
+
+| | verdetto sul campo |
+|---|---|
+| **AV1 a 129 Mbps, 8K60** | **riproduzione perfetta.** Nessun problema di decodifica |
+| **AV1 a 190 Mbps** | fluido, ma **nessuna differenza visibile** rispetto ai 129 |
+| **HEVC x265 a 162 Mbps** | fluido, nessuna differenza visibile rispetto ad AV1 129 |
+| **HEVC hardware a 121 Mbps** | il riferimento: qualità giudicata insufficiente |
+| **HEVC 8K30 a 121 Mbps** | **bocciato**: il più nitido alle misure, inguardabile in volo |
+
+Le due lezioni:
+
+1. **Sopra ~130 Mbps in AV1 non si vede più nulla.** I punti di VMAF continuano a
+   salire, l'occhio no. Il bitrate utile finisce lì: oltre, si riempie solo il
+   disco.
+2. **Le metriche non sanno niente del movimento della testa.** VMAF ha dato 98,3
+   all'8K30, il valore più alto di tutta la campagna, su un file che nel visore è
+   inutilizzabile. Per il 360 **una metrica per fotogramma non è un giudizio.**
+
 ### Cosa non dicono questi numeri
 
 - **Una sola clip di 6 secondi**, con molto cielo: una scena non facilissima ma
   nemmeno estrema.
 - **VMAF non conosce l'equirettangolare** e non è tarato per l'8K. Penalizza
   inoltre i parametri psicovisivi di x265, che nel visore aiutano.
-- **Il visore decide.** Un punto di VMAF non si vede; quattro sì.
+- **Il visore decide.** Un punto di VMAF non si vede; quattro sì — e sul
+  framerate la metrica mente (vedi sopra).
 - Lo script per rifare le misure sulle proprie clip è in
   [`tools/bench_quality.sh`](../tools/bench_quality.sh).
 
