@@ -74,10 +74,10 @@ DEFAULT_BITRATE = {"hw": "120", "h264": "200"}
 # x265 -preset slow. Solo CRF: SVT-AV1 rifiuta bitrate target sopra 100 Mbps.
 X265_PRESETS = ["ultrafast", "fast", "medium", "slow", "slower"]
 AV1_PRESETS = ["10", "9", "8", "7", "6"]
-AV1_DEFAULT_CRF = "28"
-# Bitrate misurati su 8K60 per la stima dello spazio: 122 Mbps a CRF 28,
-# circa +9% per ogni punto di CRF in meno.
-AV1_MBPS_AT_CRF28 = 122.0
+AV1_DEFAULT_CRF = "29"
+# Bitrate misurati per la stima dello spazio: 122 Mbps a CRF 28 su 8K60,
+# 127 a CRF 29 su 8K50, circa +9% per ogni punto di CRF in meno.
+AV1_MBPS_AT_CRF28 = 127.0
 
 # Risoluzioni output: larghezze dei preset, l'altezza dipende dalla modalità 3D
 # (le etichette mostrano il caso mono 2:1). None = mantieni originale.
@@ -344,8 +344,9 @@ class EncoderApp:
         self._hint(frm_enc, "→ x265: il preset vale quanto un gradino di bitrate — misurato su 8K60, 'slow' a 120 Mbps rende "
                             "come 'medium' a 160 e come l'hardware a 165. 'fast' se il tempo conta. "
                             "CRF: 16 = altissima qualità; più basso (14) = più pesante, più alto (18-20) = più leggero. "
-                            "AV1: preset 8 è il punto di equilibrio (più basso = più lento e più bello), CRF 28 ≈ 120 Mbps "
-                            "su un 8K60, CRF 24 ≈ 175. "
+                            "AV1: preset 8 è il punto di equilibrio (più basso = più lento e più bello). "
+                            "CRF 29 ≈ 127 Mbps su un 8K50, CRF 28 ≈ 122 su un 8K60: sono i valori verificati nel "
+                            "visore, oltre non si vede differenza. "
                             "I parametri x265 si scelgono da soli in base al carico: fino a 6K60/8K30 tetto VBV 120 Mbps, "
                             "7K60/8K50/8K60 tetto 160 Mbps. "
                             "In CRF la dimensione finale non è prevedibile: la stima usa il tetto VBV, quindi è prudenziale.",

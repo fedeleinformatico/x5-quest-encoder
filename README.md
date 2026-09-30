@@ -57,7 +57,8 @@ In breve:
 3. **Risoluzione e framerate nativi**, mai upscale. Non scendere a 30 fps: nel
    visore, in movimento, è inguardabile.
 4. Verifica il colore della sorgente.
-5. AV1 a CRF 28, o HEVC `-tag:v hvc1`; metadati con `exiftool -api LargeFileSupport=1`.
+5. AV1 a CRF 29 (8K50) o 28 (8K60), oppure HEVC `-tag:v hvc1`; metadati con
+   `exiftool -api LargeFileSupport=1`.
 6. Prova nel visore (DeoVR / Pigasus), con la testa in movimento.
 
 ## Storia
@@ -75,7 +76,8 @@ Comandi e limiti tecnici della guida sono stati provati su Mac M4 con FFmpeg 8.1
 x265 4.2, SVT-AV1 4.1 ed exiftool 12.85, con confronti VMAF su master ProRes 8K
 reali; le specifiche delle camere vengono dalle pagine Insta360. Le scelte sono
 poi state verificate su Meta Quest 3 con clip da 60 s: è così che AV1 è stato
-promosso e il 30 fps bocciato (sezione 14 della guida).
+promosso, il 30 fps bocciato e il bitrate utile fermato a ~130 Mbps
+(sezione 14 della guida, che riporta anche dove la nitidezza si perde davvero).
 
 ## Licenza
 

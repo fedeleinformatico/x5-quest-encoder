@@ -681,6 +681,23 @@ Con un encoder efficiente l'8K resta avanti anche strozzato. Con l'hardware si
 inverte. Da qui la regola pratica: **se codifichi in hardware, scendere a 6K ha
 senso; se codifichi in x265 o AV1, tieni l'8K.**
 
+### AV1: il CRF da usare, per sorgente
+
+Il CRF non è un bitrate: lo stesso valore rende diversamente secondo framerate e
+contenuto. Misurato con `-preset 8`:
+
+| sorgente | CRF | Mbps prodotti | VMAF |
+|----------|----:|--------------:|-----:|
+| **X6 8K50** | 30 | 119 | 95,1 |
+| **X6 8K50** | **29** | **127** | **95,5** |
+| X6 8K50 | 28 | 136 | 95,8 |
+| X6 8K50 | 26 | 159 | 96,6 |
+| **Pro 2 8K60** | **28** | **122** | **95,2** |
+
+**CRF 29 per l'8K50, CRF 28 per l'8K60**: entrambi atterrano intorno ai 125 Mbps,
+la soglia confermata nel visore. Su materiale nuovo conviene misurare 6 secondi
+prima di lanciare un batch.
+
 ### Verifica nel visore (Quest 3, file locale, clip da 60 s)
 
 Le stesse codifiche, guardate in cuffia con la testa in movimento. È qui che due
@@ -702,6 +719,38 @@ Le due lezioni:
 2. **Le metriche non sanno niente del movimento della testa.** VMAF ha dato 98,3
    all'8K30, il valore più alto di tutta la campagna, su un file che nel visore è
    inutilizzabile. Per il 360 **una metrica per fotogramma non è un giudizio.**
+
+### Dove finisce davvero la nitidezza
+
+Due prove chiudono il discorso, e spostano il problema fuori dalla codifica.
+
+**1. Il master e il file AV1 sono indistinguibili.** Ritagli 1400×1400 al 100%
+dallo stesso fotogramma, master ProRes contro AV1 a 127 Mbps: nessuna differenza
+visibile. Se non si distingue l'uscita dall'ingresso, **l'encoder ha finito il
+suo lavoro**: ogni Mbps in più è disco sprecato.
+
+**2. Il master 8K contiene poco dettaglio oltre il 6K.** Riducendo il master e
+riportandolo a 8K:
+
+| | PSNR |
+|---|---:|
+| 6K → 8K | **51,0 dB** (quasi identico) |
+| 4K → 8K | 41,6 dB (perdita netta) |
+
+51 dB significa che fra 6016 e 7680 px di larghezza c'è molto poco da salvare:
+un 8K da 360 è, in pratica, **un 6K molto pulito**. Il limite sta nell'ottica e
+nello stitching, non nella catena di export. Conviene comunque consegnare 8K
+nativo — costa poco con AV1 e non butta via quel poco che c'è — ma **non aspettarsi
+nitidezza in più dal bitrate.**
+
+> ⚠️ **Attenzione al metodo.** Lo stesso confronto misurato in VMAF dava 98,5 a un
+> master ridotto a 4K e ringrandito, più di qualunque codifica reale: **a 8K VMAF
+> non vede la perdita di dettaglio fine.** Per queste domande servono PSNR e
+> l'occhio, non VMAF.
+
+**3. Lo sharpening non aiuta.** `unsharp` a tre intensità, a bitrate invariato
+(135-137 Mbps): **nessun vantaggio visibile sui fermi immagine.** Non è nella GUI
+e non serve aggiungerlo.
 
 ### Cosa non dicono questi numeri
 
