@@ -580,8 +580,9 @@ Dipendenze da riga di comando: `ffmpeg`, `ffprobe`, `exiftool`
 - **Batch** di file ProRes/MOV → `<nome>_quest.mp4`.
 - **Cartella di destinazione separata** — utile per scrivere su un disco diverso da
   quello del sorgente (più veloce, e aggira il disco pieno).
-- **Quattro encoder**: HEVC hardware (★ default), HEVC software x265 tuned,
-  **AV1 (libsvtav1)**, H.264 old-style (VideoToolbox fino a 4096 px, libx264 sopra).
+- **Quattro encoder**: **AV1 (libsvtav1, ★ default)**, HEVC hardware (il più
+  veloce), HEVC software x265 tuned, H.264 old-style (VideoToolbox fino a
+  4096 px, libx264 sopra).
 - **Ridimensionamento** con scaler lanczos, preset nativi (8K, 6K 6016×3008 della
   X6, 5.7K della X5) + larghezza personalizzata. L'altezza segue la modalità 3D:
   2:1 mono, 1:1 top-bottom, 4:1 side-by-side.

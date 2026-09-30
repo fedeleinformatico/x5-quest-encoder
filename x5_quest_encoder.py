@@ -193,7 +193,8 @@ class EncoderApp:
         self.proc = None
         self.worker = None
         self.log_q = queue.Queue()
-        self._crf_family = "x265"
+        # la GUI parte con AV1 selezionato: la famiglia iniziale è quella
+        self._crf_family = "av1"
         self._crf_saved = {"x265": ("slow", "16"), "av1": ("8", AV1_DEFAULT_CRF)}
         self.cancel_flag = threading.Event()
 
@@ -310,36 +311,37 @@ class EncoderApp:
         frm_enc = ttk.LabelFrame(self.body, text="Encoder")
         frm_enc.pack(fill="x", **pad)
 
-        self.encoder = tk.StringVar(value="hw")
-        ttk.Radiobutton(frm_enc, text="Hardware HEVC — hevc_videotoolbox (veloce, ~4 min/clip) ★ consigliato",
-                        variable=self.encoder, value="hw",
-                        command=self._sync_enc_widgets).grid(row=0, column=0, columnspan=4, sticky="w", padx=6, pady=2)
-        ttk.Radiobutton(frm_enc, text="Software HEVC — libx265 (più bello, più lento)",
-                        variable=self.encoder, value="sw",
-                        command=self._sync_enc_widgets).grid(row=1, column=0, columnspan=4, sticky="w", padx=6, pady=2)
-        ttk.Radiobutton(frm_enc, text="AV1 — libsvtav1 (qualità alta a bitrate basso, sperimentale a 8K)",
+        self.encoder = tk.StringVar(value="av1")
+        ttk.Radiobutton(frm_enc, text="AV1 — libsvtav1 (Quest 3: qualità di un HEVC a 200 Mbps usandone 127) ★ consigliato",
                         variable=self.encoder, value="av1",
+                        command=self._sync_enc_widgets).grid(row=0, column=0, columnspan=4, sticky="w", padx=6, pady=2)
+        ttk.Radiobutton(frm_enc, text="Hardware HEVC — hevc_videotoolbox (il più veloce, ~4 min/clip)",
+                        variable=self.encoder, value="hw",
+                        command=self._sync_enc_widgets).grid(row=1, column=0, columnspan=4, sticky="w", padx=6, pady=2)
+        ttk.Radiobutton(frm_enc, text="Software HEVC — libx265 (resa migliore in HEVC, molto lento)",
+                        variable=self.encoder, value="sw",
                         command=self._sync_enc_widgets).grid(row=2, column=0, columnspan=4, sticky="w", padx=6, pady=2)
         ttk.Radiobutton(frm_enc, text="H.264 old-style — h264_videotoolbox (massima compatibilità)",
                         variable=self.encoder, value="h264",
                         command=self._sync_enc_widgets).grid(row=3, column=0, columnspan=4, sticky="w", padx=6, pady=2)
-        self._hint(frm_enc, "→ HEVC HW = default: veloce e sicuro, ma è il meno efficiente: a parità di qualità serve "
-                            "circa il 60% di bitrate in più di x265. Software = resa migliore, molto più lento. "
-                            "AV1 = la stessa qualità dell'HEVC hardware con ~40% di bitrate in meno e tempi "
-                            "intermedi, ma va verificato che il player nel visore lo riproduca. H.264 = solo per compatibilità con player/dispositivi "
+        self._hint(frm_enc, "→ AV1 = default per la Quest 3: verificato nel visore, decodifica hardware, ~40% di bitrate in meno "
+                            "a parità di qualità e sei volte più rapido di x265 slow (ma SVT-AV1 dà l'8K per "
+                            "sperimentale). HEVC HW = il più veloce, da usare quando il player non gestisce AV1 o "
+                            "servono tempi minimi: è il meno efficiente, a parità di qualità gli serve il 60% di "
+                            "bitrate in più di x265. Software = la resa migliore in HEVC, molto più lento. H.264 = solo per compatibilità con player/dispositivi "
                             "vecchi — vedi i limiti nel riquadro H.264 più sotto.",
                    row=4, column=0, columnspan=4, sticky="w", padx=6)
 
         # preset (solo software)
         ttk.Label(frm_enc, text="Preset x265:").grid(row=5, column=0, sticky="e", padx=6)
-        self.preset = tk.StringVar(value="slow")
+        self.preset = tk.StringVar(value="8")
         self.cmb_preset = ttk.Combobox(frm_enc, textvariable=self.preset, width=10, state="readonly",
-                                       values=X265_PRESETS)
+                                       values=AV1_PRESETS)
         self.cmb_preset.grid(row=5, column=1, sticky="w", padx=6, pady=2)
 
         ttk.Label(frm_enc, text="CRF (sw):").grid(row=5, column=2, sticky="e", padx=6)
-        self.crf = tk.StringVar(value="16")
-        self.spn_crf = ttk.Spinbox(frm_enc, from_=10, to=28, textvariable=self.crf, width=6)
+        self.crf = tk.StringVar(value=AV1_DEFAULT_CRF)
+        self.spn_crf = ttk.Spinbox(frm_enc, from_=18, to=40, textvariable=self.crf, width=6)
         self.spn_crf.grid(row=5, column=3, sticky="w", padx=6, pady=2)
         self._hint(frm_enc, "→ x265: il preset vale quanto un gradino di bitrate — misurato su 8K60, 'slow' a 120 Mbps rende "
                             "come 'medium' a 160 e come l'hardware a 165. 'fast' se il tempo conta. "

@@ -26,11 +26,11 @@ Homebrew con `brew install python-tk`).
 ## Cosa fa
 
 - **Batch** di file ProRes/MOV → `<nome>_quest.mp4`, anche su un disco diverso.
-- **Quattro encoder**: **AV1** (libsvtav1 — la scelta migliore per l'8K: qualità
-  di un HEVC a 200 Mbps usandone 130, decodifica hardware sulla Quest 3), HEVC
-  hardware VideoToolbox (il più veloce), HEVC software libx265 con parametri
-  tarati per fascia di risoluzione, H.264 per compatibilità (VideoToolbox fino a
-  4096 px, libx264 oltre).
+- **Quattro encoder**: **AV1** (libsvtav1, predefinito — qualità di un HEVC a
+  200 Mbps usandone 127, decodifica hardware sulla Quest 3), HEVC hardware
+  VideoToolbox (il più veloce, da usare se il player non gestisce AV1), HEVC
+  software libx265 con parametri tarati per fascia di risoluzione, H.264 per
+  compatibilità (VideoToolbox fino a 4096 px, libx264 oltre).
 - **Ridimensionamento** lanczos con i preset nativi (8K, 6K 6016×3008, 5.7K) —
   solo verso il basso, l'upscale viene bloccato. Supporta anche lo stereo
   top-bottom (1:1, es. Pro 2 3D) e side-by-side.
