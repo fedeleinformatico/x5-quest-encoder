@@ -21,6 +21,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import sys
 import threading
 import time
 import queue
@@ -54,6 +55,12 @@ X265_HIGH_THRESHOLD = 1_200_000_000
 # Tetti di bitrate imposti dal VBV (Mbps): servono per stimare la dimensione
 # massima dell'output in modalità CRF.
 X265_VBV_MAXRATE_MBPS = {"std": 120, "high": 160}
+
+# Encoder hardware: VideoToolbox su macOS, NVENC (GPU NVIDIA) su Windows/Linux.
+if sys.platform == "darwin":
+    HW_HEVC, HW_H264 = "hevc_videotoolbox", "h264_videotoolbox"
+else:
+    HW_HEVC, HW_H264 = "hevc_nvenc", "h264_nvenc"
 
 # h264_videotoolbox non apre l'encoder oltre 4096 px per lato (verificato su
 # Apple Silicon): sopra si passa a libx264.
@@ -403,13 +410,13 @@ class EncoderApp:
         ttk.Radiobutton(frm_enc, text="AV1 — libsvtav1 (Quest 3: qualità di un HEVC a 200 Mbps usandone 127) ★ consigliato",
                         variable=self.encoder, value="av1",
                         command=self._sync_enc_widgets).grid(row=0, column=0, columnspan=4, sticky="w", padx=6, pady=2)
-        ttk.Radiobutton(frm_enc, text="Hardware HEVC — hevc_videotoolbox (il più veloce, ~4 min/clip)",
+        ttk.Radiobutton(frm_enc, text="Hardware HEVC — " + HW_HEVC + " (il più veloce, ~4 min/clip)",
                         variable=self.encoder, value="hw",
                         command=self._sync_enc_widgets).grid(row=1, column=0, columnspan=4, sticky="w", padx=6, pady=2)
         ttk.Radiobutton(frm_enc, text="Software HEVC — libx265 (resa migliore in HEVC, molto lento)",
                         variable=self.encoder, value="sw",
                         command=self._sync_enc_widgets).grid(row=2, column=0, columnspan=4, sticky="w", padx=6, pady=2)
-        ttk.Radiobutton(frm_enc, text="H.264 old-style — h264_videotoolbox (massima compatibilità)",
+        ttk.Radiobutton(frm_enc, text="H.264 old-style — " + HW_H264 + " (massima compatibilità)",
                         variable=self.encoder, value="h264",
                         command=self._sync_enc_widgets).grid(row=3, column=0, columnspan=4, sticky="w", padx=6, pady=2)
         self._hint(frm_enc, "→ AV1 = default per la Quest 3: verificato nel visore, decodifica hardware, ~40% di bitrate in meno "
@@ -1075,7 +1082,7 @@ class EncoderApp:
         enc = self.encoder.get()
         br = self._bitrate()
         if enc == "hw":
-            cmd += ["-c:v", "hevc_videotoolbox", "-profile:v", "main10",
+            cmd += ["-c:v", HW_HEVC, "-profile:v", "main10",
                     "-b:v", f"{br}M", "-pix_fmt", "p010le"]
             tag = "hvc1"
         elif enc == "h264":
@@ -1083,7 +1090,7 @@ class EncoderApp:
             if self._h264_software(src):
                 cmd += ["-c:v", "libx264", "-preset", "fast"]
             else:
-                cmd += ["-c:v", "h264_videotoolbox"]
+                cmd += ["-c:v", HW_H264]
             cmd += ["-b:v", f"{br}M", "-maxrate", f"{br}M",
                     "-bufsize", f"{max(50, int(float(br) / 2))}M",
                     "-pix_fmt", "yuv420p", "-g", str(self._keyint(src))]
