@@ -254,6 +254,7 @@ class EncoderApp:
         self.proc = None
         self.worker = None
         self.log_q = queue.Queue()
+        self._prog_live = False          # l'ultima riga del log è una riga di avanzamento
         self.ui_q = queue.Queue()        # callback da eseguire nel thread della GUI
         # la GUI parte con AV1 selezionato: la famiglia iniziale è quella
         self._crf_family = "av1"
@@ -281,6 +282,9 @@ class EncoderApp:
         # --- Log (fisso in basso) ---
         frm_log = ttk.LabelFrame(self.root, text="Log")
         frm_log.pack(side="bottom", fill="both", expand=False, **pad)
+        self.show_raw = tk.BooleanVar(value=True)
+        ttk.Checkbutton(frm_log, text="Mostra l'uscita grezza di ffmpeg (riga di avanzamento, aggiornata sul posto)",
+                        variable=self.show_raw).pack(side="top", anchor="w", padx=6)
         self.txt = tk.Text(frm_log, height=9, wrap="word", state="disabled",
                            background="#111", foreground="#ddd", insertbackground="#ddd")
         self.txt.pack(side="left", fill="both", expand=True, padx=(6, 0), pady=6)
@@ -832,7 +836,14 @@ class EncoderApp:
             while True:
                 msg = self.log_q.get_nowait()
                 self.txt.config(state="normal")
-                self.txt.insert("end", msg)
+                if isinstance(msg, tuple):             # ("prog", riga): sostituisce la precedente
+                    if self._prog_live:
+                        self.txt.delete("end-2l linestart", "end-1c")
+                    self.txt.insert("end", msg[1] + "\n")
+                    self._prog_live = True
+                else:
+                    self.txt.insert("end", msg)
+                    self._prog_live = False
                 self.txt.see("end")
                 self.txt.config(state="disabled")
         except queue.Empty:
@@ -1269,6 +1280,8 @@ class EncoderApp:
                 self.log("\n[annullato]\n")
                 aborted = True
                 break
+            if self.show_raw.get() and ("frame=" in line or "size=" in line) and "time=" in line:
+                self.log_q.put(("prog", line.strip()))
             m = time_re.search(line)
             if m and dur:
                 h, mn, s = m.groups()
