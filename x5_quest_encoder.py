@@ -58,9 +58,9 @@ X265_VBV_MAXRATE_MBPS = {"std": 120, "high": 160}
 
 # Encoder hardware: VideoToolbox su macOS, NVENC (GPU NVIDIA) su Windows/Linux.
 if sys.platform == "darwin":
-    HW_HEVC, HW_H264 = "hevc_videotoolbox", "h264_videotoolbox"
+    HW_HEVC, HW_H264, HW_AV1 = "hevc_videotoolbox", "h264_videotoolbox", None
 else:
-    HW_HEVC, HW_H264 = "hevc_nvenc", "h264_nvenc"
+    HW_HEVC, HW_H264, HW_AV1 = "hevc_nvenc", "h264_nvenc", "av1_nvenc"
 
 # h264_videotoolbox non apre l'encoder oltre 4096 px per lato (verificato su
 # Apple Silicon): sopra si passa a libx264.
@@ -75,7 +75,7 @@ STEREO_ASPECT = {
 }
 
 # Bitrate consigliati (Mbps) per gli encoder a bitrate fisso.
-DEFAULT_BITRATE = {"hw": "120", "h264": "200"}
+DEFAULT_BITRATE = {"hw": "120", "h264": "200", "av1hw": "120"}
 
 # AV1 (SVT-AV1): la Quest 3 lo decodifica in hardware. Misurato su 8K60 reale,
 # a 122 Mbps rende come un HEVC hardware a 206 Mbps, in un sesto del tempo di
@@ -97,6 +97,7 @@ SPEED_MPXS = {
     "av1": {"10": 240, "9": 180, "8": 134, "7": 95, "6": 65},
     "sw": {"ultrafast": 250, "fast": 80, "medium": 45, "slow": 22, "slower": 12},
     "hw": 500,
+    "av1hw": 500,
     "h264": 500,
 }
 SPEED_FILE = os.path.expanduser("~/.x5_quest_encoder_speeds.json")
@@ -419,25 +420,29 @@ class EncoderApp:
         ttk.Radiobutton(frm_enc, text="H.264 old-style — " + HW_H264 + " (massima compatibilità)",
                         variable=self.encoder, value="h264",
                         command=self._sync_enc_widgets).grid(row=3, column=0, columnspan=4, sticky="w", padx=6, pady=2)
+        if HW_AV1:
+            ttk.Radiobutton(frm_enc, text="Hardware AV1 — " + HW_AV1 + " (GPU NVIDIA: AV1 al ritmo dell'HEVC hardware)",
+                            variable=self.encoder, value="av1hw",
+                            command=self._sync_enc_widgets).grid(row=4, column=0, columnspan=4, sticky="w", padx=6, pady=2)
         self._hint(frm_enc, "→ AV1 = default per la Quest 3: verificato nel visore, decodifica hardware, ~40% di bitrate in meno "
                             "a parità di qualità e sei volte più rapido di x265 slow (ma SVT-AV1 dà l'8K per "
                             "sperimentale). HEVC HW = il più veloce, da usare quando il player non gestisce AV1 o "
                             "servono tempi minimi: è il meno efficiente, a parità di qualità gli serve il 60% di "
                             "bitrate in più di x265. Software = la resa migliore in HEVC, molto più lento. H.264 = solo per compatibilità con player/dispositivi "
                             "vecchi — vedi i limiti nel riquadro H.264 più sotto.",
-                   row=4, column=0, columnspan=4, sticky="w", padx=6)
+                   row=5, column=0, columnspan=4, sticky="w", padx=6)
 
         # preset (solo software)
-        ttk.Label(frm_enc, text="Preset x265:").grid(row=5, column=0, sticky="e", padx=6)
+        ttk.Label(frm_enc, text="Preset x265:").grid(row=6, column=0, sticky="e", padx=6)
         self.preset = tk.StringVar(value="8")
         self.cmb_preset = ttk.Combobox(frm_enc, textvariable=self.preset, width=10, state="readonly",
                                        values=AV1_PRESETS)
-        self.cmb_preset.grid(row=5, column=1, sticky="w", padx=6, pady=2)
+        self.cmb_preset.grid(row=6, column=1, sticky="w", padx=6, pady=2)
 
-        ttk.Label(frm_enc, text="CRF (sw):").grid(row=5, column=2, sticky="e", padx=6)
+        ttk.Label(frm_enc, text="CRF (sw):").grid(row=6, column=2, sticky="e", padx=6)
         self.crf = tk.StringVar(value=AV1_DEFAULT_CRF)
         self.spn_crf = ttk.Spinbox(frm_enc, from_=18, to=40, textvariable=self.crf, width=6)
-        self.spn_crf.grid(row=5, column=3, sticky="w", padx=6, pady=2)
+        self.spn_crf.grid(row=6, column=3, sticky="w", padx=6, pady=2)
         self._hint(frm_enc, "→ x265: il preset vale quanto un gradino di bitrate — misurato su 8K60, 'slow' a 120 Mbps rende "
                             "come 'medium' a 160 e come l'hardware a 165. 'fast' se il tempo conta. "
                             "CRF: 16 = altissima qualità; più basso (14) = più pesante, più alto (18-20) = più leggero. "
@@ -447,17 +452,17 @@ class EncoderApp:
                             "I parametri x265 si scelgono da soli in base al carico: fino a 6K60/8K30 tetto VBV 120 Mbps, "
                             "7K60/8K50/8K60 tetto 160 Mbps. "
                             "In CRF la dimensione finale non è prevedibile: la stima usa il tetto VBV, quindi è prudenziale.",
-                   row=6, column=0, columnspan=4, sticky="w", padx=6)
+                   row=7, column=0, columnspan=4, sticky="w", padx=6)
 
         # bitrate (hardware HEVC e H264)
-        ttk.Label(frm_enc, text="Bitrate (Mbps):").grid(row=7, column=0, sticky="e", padx=6)
+        ttk.Label(frm_enc, text="Bitrate (Mbps):").grid(row=8, column=0, sticky="e", padx=6)
         self.bitrate = tk.StringVar(value=DEFAULT_BITRATE["hw"])
         self.spn_br = ttk.Spinbox(frm_enc, from_=40, to=250, textvariable=self.bitrate, width=6)
-        self.spn_br.grid(row=7, column=1, sticky="w", padx=6, pady=2)
+        self.spn_br.grid(row=8, column=1, sticky="w", padx=6, pady=2)
         self._hint(frm_enc, "→ Per HEVC HW: 120 Mbps per 6K60 e 8K30 da file locale (140-150 se vedi blocchi su acqua/foglie). "
                             "Per H.264 old-style: 200 Mbps è il valore classico Quest. Cambiando encoder il valore "
                             "consigliato si imposta da solo. Promemoria: 120 Mbps = circa 0,9 GB al minuto.",
-                   row=8, column=0, columnspan=4, sticky="w", padx=6)
+                   row=9, column=0, columnspan=4, sticky="w", padx=6)
 
         # --- Riquadro limiti H.264 ---
         frm_h264 = ttk.LabelFrame(self.body, text="ℹ︎ H.264 old-style — limiti da sapere")
@@ -821,7 +826,7 @@ class EncoderApp:
         cur = self.bitrate.get().strip()
         if enc == "h264" and cur in ("", DEFAULT_BITRATE["hw"]):
             self.bitrate.set(DEFAULT_BITRATE["h264"])
-        elif enc == "hw" and cur in ("", DEFAULT_BITRATE["h264"]):
+        elif enc in ("hw", "av1hw") and cur in ("", DEFAULT_BITRATE["h264"]):
             self.bitrate.set(DEFAULT_BITRATE["hw"])
 
     # ------------------------------------------------------------- deps
@@ -1095,6 +1100,11 @@ class EncoderApp:
                     "-bufsize", f"{max(50, int(float(br) / 2))}M",
                     "-pix_fmt", "yuv420p", "-g", str(self._keyint(src))]
             tag = "avc1"
+        elif enc == "av1hw":
+            cmd += ["-c:v", HW_AV1, "-preset", "p5", "-tune", "hq",
+                    "-b:v", f"{br}M", "-maxrate", f"{int(float(br) * 1.5)}M",
+                    "-pix_fmt", "p010le", "-g", str(self._keyint(src))]
+            tag = None
         elif enc == "av1":
             # SVT-AV1 accetta solo CRF sopra i 100 Mbps: -b:v 0 disattiva l'ABR.
             cmd += ["-c:v", "libsvtav1", "-preset", self.preset.get(),
