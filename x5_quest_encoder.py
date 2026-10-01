@@ -21,7 +21,9 @@ import re
 import shlex
 import shutil
 import subprocess
+import sys
 import threading
+import time
 import queue
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
@@ -54,6 +56,12 @@ X265_HIGH_THRESHOLD = 1_200_000_000
 # massima dell'output in modalità CRF.
 X265_VBV_MAXRATE_MBPS = {"std": 120, "high": 160}
 
+# Encoder hardware: VideoToolbox su macOS, NVENC (GPU NVIDIA) su Windows/Linux.
+if sys.platform == "darwin":
+    HW_HEVC, HW_H264, HW_AV1 = "hevc_videotoolbox", "h264_videotoolbox", None
+else:
+    HW_HEVC, HW_H264, HW_AV1 = "hevc_nvenc", "h264_nvenc", "av1_nvenc"
+
 # h264_videotoolbox non apre l'encoder oltre 4096 px per lato (verificato su
 # Apple Silicon): sopra si passa a libx264.
 H264_VT_MAX_SIDE = 4096
@@ -67,7 +75,7 @@ STEREO_ASPECT = {
 }
 
 # Bitrate consigliati (Mbps) per gli encoder a bitrate fisso.
-DEFAULT_BITRATE = {"hw": "120", "h264": "200"}
+DEFAULT_BITRATE = {"hw": "120", "h264": "200", "av1hw": "120"}
 
 # AV1 (SVT-AV1): la Quest 3 lo decodifica in hardware. Misurato su 8K60 reale,
 # a 122 Mbps rende come un HEVC hardware a 206 Mbps, in un sesto del tempo di
@@ -78,6 +86,49 @@ AV1_DEFAULT_CRF = "29"
 # Bitrate misurati per la stima dello spazio: 122 Mbps a CRF 28 su 8K60,
 # 127 a CRF 29 su 8K50, circa +9% per ogni punto di CRF in meno.
 AV1_MBPS_AT_CRF28 = 127.0
+
+# Velocità di codifica attese, in Mpx/s di frame in uscita (larghezza × altezza ×
+# fps × secondi di video / secondi di orologio). Misurate su un 8K50 ProRes con
+# un Mac Apple Silicon: SVT-AV1 preset 8 ≈ 0,09x (≈134 Mpx/s), hevc_videotoolbox
+# ≈ 0,35x (≈500 Mpx/s, il collo di bottiglia è la decodifica del ProRes).
+# I preset diversi dal misurato sono proporzioni indicative: dopo ogni encode
+# riuscito il valore reale viene salvato in SPEED_FILE e sostituisce la stima.
+SPEED_MPXS = {
+    "av1": {"10": 240, "9": 180, "8": 134, "7": 95, "6": 65},
+    "sw": {"ultrafast": 250, "fast": 80, "medium": 45, "slow": 22, "slower": 12},
+    "hw": 500,
+    "av1hw": 500,
+    "h264": 500,
+}
+SPEED_FILE = os.path.expanduser("~/.x5_quest_encoder_speeds.json")
+
+
+def load_speeds():
+    try:
+        with open(SPEED_FILE) as f:
+            return {k: float(v) for k, v in json.load(f).items()}
+    except Exception:
+        return {}
+
+
+def save_speed(key, mpxs):
+    """Media mobile fra il valore salvato e quello appena misurato."""
+    data = load_speeds()
+    data[key] = round(mpxs if key not in data else 0.5 * data[key] + 0.5 * mpxs, 1)
+    try:
+        with open(SPEED_FILE, "w") as f:
+            json.dump(data, f, indent=1)
+    except OSError:
+        pass
+
+
+def fmt_dur(sec):
+    """Durata leggibile: '45 s', '12 min', '2 h 05 min'."""
+    if sec < 90:
+        return f"{int(sec)} s"
+    mins = int(round(sec / 60))
+    return f"{mins} min" if mins < 60 else f"{mins // 60} h {mins % 60:02d} min"
+
 
 # Risoluzioni output: larghezze dei preset, l'altezza dipende dalla modalità 3D
 # (le etichette mostrano il caso mono 2:1). None = mantieni originale.
@@ -125,8 +176,9 @@ def which(cmd):
 _probe_cache = {}
 
 
-def ffprobe_video(path):
-    """(larghezza, altezza, fps) del primo stream video, o None. Con cache."""
+def ffprobe_info(path):
+    """Dict con codec, width, height, fps, pix_fmt, transfer, primaries, duration
+    del primo stream video, o None. Con cache (chiave: percorso + mtime)."""
     try:
         key = (path, os.path.getmtime(path))
     except OSError:
@@ -137,17 +189,34 @@ def ffprobe_video(path):
     try:
         out = subprocess.run(
             ["ffprobe", "-v", "error", "-select_streams", "v:0",
-             "-show_entries", "stream=width,height,avg_frame_rate",
+             "-show_entries",
+             "stream=codec_name,width,height,avg_frame_rate,pix_fmt,color_transfer,"
+             "color_primaries:format=duration",
              "-of", "json", path],
             capture_output=True, text=True, timeout=30)
-        st = json.loads(out.stdout)["streams"][0]
+        data = json.loads(out.stdout)
+        st = data["streams"][0]
         num, _, den = st.get("avg_frame_rate", "0/1").partition("/")
         fps = float(num) / float(den or 1) if float(den or 1) else 0.0
-        info = (int(st["width"]), int(st["height"]), fps)
+        try:
+            dur = float(data.get("format", {}).get("duration"))
+        except (TypeError, ValueError):
+            dur = None
+        info = {"codec": st.get("codec_name", "?"), "width": int(st["width"]),
+                "height": int(st["height"]), "fps": fps,
+                "pix_fmt": st.get("pix_fmt", ""),
+                "transfer": st.get("color_transfer", ""),
+                "primaries": st.get("color_primaries", ""), "duration": dur}
     except Exception:
         pass
     _probe_cache[key] = info
     return info
+
+
+def ffprobe_video(path):
+    """(larghezza, altezza, fps) del primo stream video, o None. Con cache."""
+    i = ffprobe_info(path)
+    return (i["width"], i["height"], i["fps"]) if i else None
 
 
 def ffprobe_duration(path):
@@ -193,6 +262,8 @@ class EncoderApp:
         self.proc = None
         self.worker = None
         self.log_q = queue.Queue()
+        self._prog_live = False          # l'ultima riga del log è una riga di avanzamento
+        self.ui_q = queue.Queue()        # callback da eseguire nel thread della GUI
         # la GUI parte con AV1 selezionato: la famiglia iniziale è quella
         self._crf_family = "av1"
         self._crf_saved = {"x265": ("slow", "16"), "av1": ("8", AV1_DEFAULT_CRF)}
@@ -219,6 +290,9 @@ class EncoderApp:
         # --- Log (fisso in basso) ---
         frm_log = ttk.LabelFrame(self.root, text="Log")
         frm_log.pack(side="bottom", fill="both", expand=False, **pad)
+        self.show_raw = tk.BooleanVar(value=True)
+        ttk.Checkbutton(frm_log, text="Mostra l'uscita grezza di ffmpeg (riga di avanzamento, aggiornata sul posto)",
+                        variable=self.show_raw).pack(side="top", anchor="w", padx=6)
         self.txt = tk.Text(frm_log, height=9, wrap="word", state="disabled",
                            background="#111", foreground="#ddd", insertbackground="#ddd")
         self.txt.pack(side="left", fill="both", expand=True, padx=(6, 0), pady=6)
@@ -239,7 +313,7 @@ class EncoderApp:
         self.btn_cancel.pack(side="left", padx=6)
         self.progress = ttk.Progressbar(frm_act, mode="determinate", maximum=100)
         self.progress.pack(side="left", fill="x", expand=True, padx=6)
-        self.lbl_status = ttk.Label(frm_act, text="Pronto", width=18)
+        self.lbl_status = ttk.Label(frm_act, text="Pronto", width=26)
         self.lbl_status.pack(side="right", padx=6)
 
         # --- Area configurazione scrollabile (riempie il resto) ---
@@ -276,6 +350,28 @@ class EncoderApp:
         ttk.Button(btn_col, text="Svuota", command=self.clear_files).pack(fill="x", pady=2)
         self._hint(frm_in, "→ Usa il master ProRes 422 esportato da Premiere, non l'MP4 della camera. "
                            "Più file = batch. L'output esce con suffisso _quest.mp4 nella cartella scelta qui sotto.")
+
+        # --- Analisi e consigli ---
+        frm_adv = ttk.LabelFrame(self.body, text="Analisi sorgente e consigli")
+        frm_adv.pack(fill="x", **pad)
+        self.txt_adv = tk.Text(frm_adv, height=12, wrap="word", state="disabled", relief="flat",
+                               background=self.root.cget("background"), font=("", 11))
+        self.txt_adv.pack(fill="x", padx=8, pady=(6, 2))
+        for tag, color in (("ok", "#060"), ("warn", "#a60"), ("bad", "#b00"), ("dim", "#666")):
+            self.txt_adv.tag_configure(tag, foreground=color)
+        self.txt_adv.tag_configure("head", font=("", 11, "bold"))
+        row_adv = ttk.Frame(frm_adv)
+        row_adv.pack(fill="x")
+        self.btn_apply = ttk.Button(row_adv, text="✓  Applica i consigli", command=self.apply_advice,
+                                    state="disabled")
+        self.btn_apply.pack(side="left", padx=8, pady=(0, 6))
+        self.lbl_adv_note = ttk.Label(row_adv, text="", foreground="#7a7a7a", font=("", 10))
+        self.lbl_adv_note.pack(side="left", padx=4, pady=(0, 6))
+        self._fixes = []
+        self._an_gen = 0
+        self._an_after = None
+        self._adv_text(["Aggiungi un file sorgente: qui compaiono formato, tempo stimato e consigli sui settaggi."],
+                       ["dim"])
 
         # --- Destinazione ---
         frm_out = ttk.LabelFrame(self.body, text="Cartella di destinazione")
@@ -315,34 +411,38 @@ class EncoderApp:
         ttk.Radiobutton(frm_enc, text="AV1 — libsvtav1 (Quest 3: qualità di un HEVC a 200 Mbps usandone 127) ★ consigliato",
                         variable=self.encoder, value="av1",
                         command=self._sync_enc_widgets).grid(row=0, column=0, columnspan=4, sticky="w", padx=6, pady=2)
-        ttk.Radiobutton(frm_enc, text="Hardware HEVC — hevc_videotoolbox (il più veloce, ~4 min/clip)",
+        ttk.Radiobutton(frm_enc, text="Hardware HEVC — " + HW_HEVC + " (il più veloce, ~4 min/clip)",
                         variable=self.encoder, value="hw",
                         command=self._sync_enc_widgets).grid(row=1, column=0, columnspan=4, sticky="w", padx=6, pady=2)
         ttk.Radiobutton(frm_enc, text="Software HEVC — libx265 (resa migliore in HEVC, molto lento)",
                         variable=self.encoder, value="sw",
                         command=self._sync_enc_widgets).grid(row=2, column=0, columnspan=4, sticky="w", padx=6, pady=2)
-        ttk.Radiobutton(frm_enc, text="H.264 old-style — h264_videotoolbox (massima compatibilità)",
+        ttk.Radiobutton(frm_enc, text="H.264 old-style — " + HW_H264 + " (massima compatibilità)",
                         variable=self.encoder, value="h264",
                         command=self._sync_enc_widgets).grid(row=3, column=0, columnspan=4, sticky="w", padx=6, pady=2)
+        if HW_AV1:
+            ttk.Radiobutton(frm_enc, text="Hardware AV1 — " + HW_AV1 + " (GPU NVIDIA: AV1 al ritmo dell'HEVC hardware)",
+                            variable=self.encoder, value="av1hw",
+                            command=self._sync_enc_widgets).grid(row=4, column=0, columnspan=4, sticky="w", padx=6, pady=2)
         self._hint(frm_enc, "→ AV1 = default per la Quest 3: verificato nel visore, decodifica hardware, ~40% di bitrate in meno "
                             "a parità di qualità e sei volte più rapido di x265 slow (ma SVT-AV1 dà l'8K per "
                             "sperimentale). HEVC HW = il più veloce, da usare quando il player non gestisce AV1 o "
                             "servono tempi minimi: è il meno efficiente, a parità di qualità gli serve il 60% di "
                             "bitrate in più di x265. Software = la resa migliore in HEVC, molto più lento. H.264 = solo per compatibilità con player/dispositivi "
                             "vecchi — vedi i limiti nel riquadro H.264 più sotto.",
-                   row=4, column=0, columnspan=4, sticky="w", padx=6)
+                   row=5, column=0, columnspan=4, sticky="w", padx=6)
 
         # preset (solo software)
-        ttk.Label(frm_enc, text="Preset x265:").grid(row=5, column=0, sticky="e", padx=6)
+        ttk.Label(frm_enc, text="Preset x265:").grid(row=6, column=0, sticky="e", padx=6)
         self.preset = tk.StringVar(value="8")
         self.cmb_preset = ttk.Combobox(frm_enc, textvariable=self.preset, width=10, state="readonly",
                                        values=AV1_PRESETS)
-        self.cmb_preset.grid(row=5, column=1, sticky="w", padx=6, pady=2)
+        self.cmb_preset.grid(row=6, column=1, sticky="w", padx=6, pady=2)
 
-        ttk.Label(frm_enc, text="CRF (sw):").grid(row=5, column=2, sticky="e", padx=6)
+        ttk.Label(frm_enc, text="CRF (sw):").grid(row=6, column=2, sticky="e", padx=6)
         self.crf = tk.StringVar(value=AV1_DEFAULT_CRF)
         self.spn_crf = ttk.Spinbox(frm_enc, from_=18, to=40, textvariable=self.crf, width=6)
-        self.spn_crf.grid(row=5, column=3, sticky="w", padx=6, pady=2)
+        self.spn_crf.grid(row=6, column=3, sticky="w", padx=6, pady=2)
         self._hint(frm_enc, "→ x265: il preset vale quanto un gradino di bitrate — misurato su 8K60, 'slow' a 120 Mbps rende "
                             "come 'medium' a 160 e come l'hardware a 165. 'fast' se il tempo conta. "
                             "CRF: 16 = altissima qualità; più basso (14) = più pesante, più alto (18-20) = più leggero. "
@@ -352,17 +452,17 @@ class EncoderApp:
                             "I parametri x265 si scelgono da soli in base al carico: fino a 6K60/8K30 tetto VBV 120 Mbps, "
                             "7K60/8K50/8K60 tetto 160 Mbps. "
                             "In CRF la dimensione finale non è prevedibile: la stima usa il tetto VBV, quindi è prudenziale.",
-                   row=6, column=0, columnspan=4, sticky="w", padx=6)
+                   row=7, column=0, columnspan=4, sticky="w", padx=6)
 
         # bitrate (hardware HEVC e H264)
-        ttk.Label(frm_enc, text="Bitrate (Mbps):").grid(row=7, column=0, sticky="e", padx=6)
+        ttk.Label(frm_enc, text="Bitrate (Mbps):").grid(row=8, column=0, sticky="e", padx=6)
         self.bitrate = tk.StringVar(value=DEFAULT_BITRATE["hw"])
         self.spn_br = ttk.Spinbox(frm_enc, from_=40, to=250, textvariable=self.bitrate, width=6)
-        self.spn_br.grid(row=7, column=1, sticky="w", padx=6, pady=2)
+        self.spn_br.grid(row=8, column=1, sticky="w", padx=6, pady=2)
         self._hint(frm_enc, "→ Per HEVC HW: 120 Mbps per 6K60 e 8K30 da file locale (140-150 se vedi blocchi su acqua/foglie). "
                             "Per H.264 old-style: 200 Mbps è il valore classico Quest. Cambiando encoder il valore "
                             "consigliato si imposta da solo. Promemoria: 120 Mbps = circa 0,9 GB al minuto.",
-                   row=8, column=0, columnspan=4, sticky="w", padx=6)
+                   row=9, column=0, columnspan=4, sticky="w", padx=6)
 
         # --- Riquadro limiti H.264 ---
         frm_h264 = ttk.LabelFrame(self.body, text="ℹ︎ H.264 old-style — limiti da sapere")
@@ -466,6 +566,232 @@ class EncoderApp:
         self._sync_enc_widgets()
         self._sync_res_widgets()
         self._sync_out_widgets()
+        for v in (self.encoder, self.preset, self.crf, self.bitrate, self.resolution, self.custom_w,
+                  self.stereo, self.color, self.audio, self.same_folder, self.out_dir,
+                  self.inject_meta):
+            v.trace_add("write", lambda *a: self.schedule_analysis())
+
+    # ------------------------------------------------- analisi e consigli
+    def _adv_text(self, lines, tags):
+        t = self.txt_adv
+        t.config(state="normal")
+        t.delete("1.0", "end")
+        for line, tag in zip(lines, tags):
+            t.insert("end", line + "\n", tag)
+        t.config(state="disabled")
+        # altezza = numero di righe visive, così il riquadro non scorre dentro lo scroll esterno
+        t.config(height=max(3, min(24, int(t.index("end-1c").split(".")[0]) + sum(len(l) // 105 for l in lines))))
+
+    def schedule_analysis(self):
+        """Rilancia l'analisi dopo un attimo (evita raffiche mentre si digita)."""
+        if self._an_after:
+            self.root.after_cancel(self._an_after)
+        self._an_after = self.root.after(350, self._start_analysis)
+
+    def _start_analysis(self):
+        self._an_after = None
+        files = list(self.lst_files.get(0, "end"))
+        self._an_gen += 1
+        gen = self._an_gen
+        if not files:
+            self._fixes = []
+            self.btn_apply.config(state="disabled")
+            self.lbl_adv_note.config(text="")
+            self._adv_text(["Aggiungi un file sorgente: qui compaiono formato, tempo stimato e consigli "
+                            "sui settaggi."], ["dim"])
+            return
+        if not which("ffprobe"):
+            return
+
+        def _probe():                   # ffprobe può essere lento su dischi di rete: fuori dal thread GUI
+            for f in files:
+                ffprobe_info(f)
+            self.ui_q.put(lambda: gen == self._an_gen and self._render_analysis(files))
+        threading.Thread(target=_probe, daemon=True).start()
+
+    def mpxs(self, enc=None, preset=None):
+        """(Mpx/s, misurato?) per l'encoder: valore imparato sul Mac, altrimenti la stima di base."""
+        enc = enc or self.encoder.get()
+        preset = preset or self.preset.get()
+        key = f"{enc}:{preset}" if enc in ("av1", "sw") else enc
+        learned = load_speeds().get(key)
+        if learned:
+            return learned, True
+        base = SPEED_MPXS.get(enc, 500)
+        if isinstance(base, dict):
+            base = base.get(preset, 100)
+        return float(base), False
+
+    def job_pixels(self, src):
+        """Pixel totali da codificare per un file (frame in uscita × numero di frame)."""
+        info = ffprobe_info(src)
+        size = self._out_size(src)
+        if not info or not size or not info["duration"]:
+            return None
+        return size[0] * size[1] * info["fps"] * info["duration"]
+
+    def _render_analysis(self, files):
+        lines, tags, fixes = [], [], []
+
+        def add(text, tag="", fix=None):
+            lines.append(text)
+            tags.append(tag)
+            if fix:
+                fixes.append(fix)
+
+        enc = self.encoder.get()
+        infos = {f: ffprobe_info(f) for f in files}
+        total_px = 0.0
+        for f in files:
+            i = infos[f]
+            name = os.path.basename(f)
+            if not i:
+                add(f"• {name}: non riesco a leggerlo (ancora in scrittura, o non è un video?)", "warn")
+                continue
+            tr = i["transfer"]
+            col = ("HDR PQ" if tr == "smpte2084" else "HDR HLG" if tr == "arib-std-b67"
+                   else "SDR BT.709" if i["primaries"] in ("bt709", "") else i["primaries"])
+            dur = i["duration"]
+            px = self.job_pixels(f)
+            total_px += px or 0
+            add(f"• {name}: {i['width']}×{i['height']} · {i['fps']:.0f} fps · {i['codec']} · {col}"
+                + (f" · {fmt_dur(dur)}" if dur else ""), "head")
+
+        # --- tempo e dimensione
+        speed, learned = self.mpxs()
+        if total_px:
+            est = total_px / (speed * 1e6)
+            sizes = [self.estimate_output(f, (infos[f] or {}).get("duration")) for f in files]
+            size_txt = ""
+            if all(sizes):
+                # per l'AV1 la stima di estimate_output include +20% di margine
+                size_txt = f" · output ~{human_gb(sum(sizes) / (1.2 if enc == 'av1' else 1))}"
+            add(f"⏱  Tempo stimato: ~{fmt_dur(est)}{size_txt}", "head")
+            add("    " + ("misurato su questo Mac nelle codifiche precedenti" if learned else
+                          "stima di base: si affina da sola dopo ogni codifica riuscita"), "dim")
+            alts = []
+            for e, pr, label in (("av1", "10", "AV1 preset 10"), ("hw", "", "HEVC hardware")):
+                if (e, pr) != (enc, self.preset.get() if enc == "av1" else ""):
+                    alts.append(f"{label} ~{fmt_dur(total_px / (self.mpxs(e, pr or None)[0] * 1e6))}")
+            if alts:
+                add("    alternative: " + " · ".join(alts), "dim")
+        else:
+            add("⏱  Tempo non stimabile (durata o risoluzione non leggibili).", "dim")
+
+        # --- consigli
+        add("", "")
+        add("Consigli", "head")
+        n_tips = len(lines)
+        multi = len(files) > 1
+        for f in files:
+            main = infos[f]
+            if not main:
+                continue
+            pre = f"[{os.path.basename(f)}] " if multi else ""
+            w, h, fps = main["width"], main["height"], main["fps"]
+            # colore
+            tr = main["transfer"]
+            want = ("HDR PQ (BT.2020 / HDR10)" if tr == "smpte2084" else
+                    "HDR HLG (BT.2020)" if tr == "arib-std-b67" else None)
+            if want and self.color.get() != want:
+                add(pre + f"⚠ La sorgente è {want.split(' (')[0]} ma il colore impostato è «{self.color.get()}»: "
+                    f"nel visore i colori uscirebbero sbagliati.", "bad",
+                    lambda want=want: self.color.set(want))
+            elif not want and self.color.get() != "SDR (BT.709)" and main["primaries"] in ("bt709", ""):
+                add(pre + "⚠ La sorgente è SDR BT.709 ma il colore impostato è HDR.", "bad",
+                    lambda: self.color.set("SDR (BT.709)"))
+            if want and enc == "h264":
+                add(pre + "⚠ H.264 old-style è solo 8-bit SDR: con sorgente HDR consegna in HEVC o AV1.", "bad")
+            # forma del frame / stereo
+            ratio = w / h if h else 0
+            mode = self.stereo.get()
+            if abs(ratio - 1) < 0.02 and mode == "Mono (2D)":
+                add(pre + "⚠ Il frame è quadrato (1:1): sembra stereo Top-Bottom, ma la modalità 3D è Mono.", "warn",
+                    lambda: self.stereo.set("Stereo Top-Bottom (TB)"))
+            elif abs(ratio - 4) < 0.05 and mode == "Mono (2D)":
+                add(pre + "⚠ Il frame è 4:1: sembra stereo Side-by-Side, ma la modalità 3D è Mono.", "warn",
+                    lambda: self.stereo.set("Stereo Side-by-Side (SBS)"))
+            elif abs(ratio - 2) < 0.02 and mode != "Mono (2D)":
+                add(pre + "⚠ Il frame è 2:1 (mono) ma la modalità 3D è stereo: nel visore si vedrebbe doppio.", "warn",
+                    lambda: self.stereo.set("Mono (2D)"))
+            elif min(abs(ratio - r) for r in (1, 2, 4)) > 0.05:
+                add(pre + f"⚠ Proporzioni {w}×{h}: non sembra un equirettangolare 360 (2:1, 1:1 o 4:1).", "warn")
+            # framerate
+            if 1 <= fps < 45:
+                add(pre + f"⚠ {fps:.0f} fps: in movimento, nel visore, il 360 a bassa frequenza è quasi inguardabile. "
+                    f"Meglio girare a 50/60.", "warn")
+            if main["codec"] not in ("prores", "dnxhd", "dnxhr", "cfhd"):
+                add(pre + f"💡 La sorgente è {main['codec']}, non un master: la qualità di partenza è già "
+                    f"compressa. Meglio il ProRes esportato da Premiere.", "dim")
+        main = next((infos[f] for f in files if infos[f] and infos[f]["width"] >= 7000),
+                    next((infos[f] for f in files if infos[f]), None))
+        if main:
+            w, h, fps = main["width"], main["height"], main["fps"]
+            # AV1: CRF in base a risoluzione e fps (valori verificati nel visore)
+            if enc == "av1" and w >= 7000:
+                try:
+                    crf = int(float(self.crf.get() or AV1_DEFAULT_CRF))
+                except ValueError:
+                    crf = 0
+                good = 28 if fps >= 55 else 29
+                if crf != good:
+                    add(f"💡 AV1 su 8K{fps:.0f}: il CRF verificato nel visore è {good} (ora {crf}).", "warn",
+                        lambda good=good: self.crf.set(str(good)))
+                else:
+                    add(f"✓ CRF {crf} è il valore verificato nel visore per l'8K{fps:.0f}.", "ok")
+            # HEVC a pochi bit per pixel
+            if enc in ("hw", "sw") and w * h * fps > X265_HIGH_THRESHOLD and \
+                    RESOLUTIONS.get(self.resolution.get()) is None:
+                add(f"💡 8K a {fps:.0f} fps in HEVC dà pochi bit per pixel: o passi ad AV1, o scali a 6K60 "
+                    f"(più nitido in movimento).", "warn",
+                    lambda: self.resolution.set(next(k for k in RESOLUTIONS if k.startswith("6K"))))
+            if enc == "av1" and w >= 7000:
+                add("💡 SVT-AV1 dichiara l'8K sperimentale: guarda il primo file nel visore prima di produrre il resto.",
+                    "dim")
+            if enc == "hw":
+                try:
+                    bitrate = int(float(self._bitrate()))
+                except ValueError:
+                    bitrate = 0
+                if bitrate and bitrate < 110 and w >= 7000:
+                    add(f"💡 HEVC hardware a {bitrate} Mbps su 8K: sotto i ~120 Mbps (quelli usati finora nel "
+                        f"visore) i blocchi su acqua e foglie diventano visibili.", "warn",
+                        lambda: self.bitrate.set(DEFAULT_BITRATE["hw"]))
+                elif bitrate > 160:
+                    add(f"💡 HEVC hardware a {bitrate} Mbps: oltre ~130 Mbps la resa non sale in modo percepibile "
+                        f"(misurato: +1,4 VMAF da 129 a 190) e si riempie solo il disco.", "warn",
+                        lambda: self.bitrate.set(DEFAULT_BITRATE["hw"]))
+        # --- metadati e disco
+        if not self.inject_meta.get():
+            add("⚠ Metadati 360 disattivati: senza, il visore riproduce l'MP4 come video piatto.", "warn",
+                lambda: self.inject_meta.set(True))
+        vols = {}
+        for f in files:
+            dst = os.path.dirname(self.dest_for(f)) or "."
+            vols.setdefault(dst, 0)
+            e = self.estimate_output(f, (infos[f] or {}).get("duration"))
+            vols[dst] += e or 0
+        for folder, need in vols.items():
+            free = free_space(folder) if os.path.isdir(folder) else None
+            if free is not None and need and free < need * 1.05:
+                add(f"⚠ Su {folder} liberi {human_gb(free)}, servono fino a ~{human_gb(need)}: scegli un altro disco.",
+                    "bad")
+        if self.same_folder.get() and files:
+            add("💡 L'output va accanto al sorgente: leggere da un disco e scrivere su un altro è più veloce "
+                "e non rischia di riempirlo.", "dim")
+        if len(lines) == n_tips:
+            add("✓ Nessun problema: i settaggi sono coerenti con la sorgente.", "ok")
+
+        self._fixes = fixes
+        self.btn_apply.config(state="normal" if fixes else "disabled")
+        self.lbl_adv_note.config(text=f"{len(fixes)} correzion{'e' if len(fixes) == 1 else 'i'} "
+                                      f"applicabil{'e' if len(fixes) == 1 else 'i'} in automatico" if fixes else "")
+        self._adv_text(lines, tags)
+
+    def apply_advice(self):
+        for fix in list(self._fixes):
+            fix()
+        self._start_analysis()
 
     def _sync_res_widgets(self):
         is_custom = RESOLUTIONS.get(self.resolution.get()) == "custom"
@@ -500,7 +826,7 @@ class EncoderApp:
         cur = self.bitrate.get().strip()
         if enc == "h264" and cur in ("", DEFAULT_BITRATE["hw"]):
             self.bitrate.set(DEFAULT_BITRATE["h264"])
-        elif enc == "hw" and cur in ("", DEFAULT_BITRATE["h264"]):
+        elif enc in ("hw", "av1hw") and cur in ("", DEFAULT_BITRATE["h264"]):
             self.bitrate.set(DEFAULT_BITRATE["hw"])
 
     # ------------------------------------------------------------- deps
@@ -522,9 +848,21 @@ class EncoderApp:
             while True:
                 msg = self.log_q.get_nowait()
                 self.txt.config(state="normal")
-                self.txt.insert("end", msg)
+                if isinstance(msg, tuple):             # ("prog", riga): sostituisce la precedente
+                    if self._prog_live:
+                        self.txt.delete("end-2l linestart", "end-1c")
+                    self.txt.insert("end", msg[1] + "\n")
+                    self._prog_live = True
+                else:
+                    self.txt.insert("end", msg)
+                    self._prog_live = False
                 self.txt.see("end")
                 self.txt.config(state="disabled")
+        except queue.Empty:
+            pass
+        try:
+            while True:
+                self.ui_q.get_nowait()()
         except queue.Empty:
             pass
         self.root.after(100, self._drain_log)
@@ -538,13 +876,16 @@ class EncoderApp:
             if p not in self.lst_files.get(0, "end"):
                 self.lst_files.insert("end", p)
         self.refresh_free()
+        self.schedule_analysis()
 
     def remove_selected(self):
         for i in reversed(self.lst_files.curselection()):
             self.lst_files.delete(i)
+        self.schedule_analysis()
 
     def clear_files(self):
         self.lst_files.delete(0, "end")
+        self.schedule_analysis()
 
     def pick_out_dir(self):
         d = filedialog.askdirectory(title="Cartella di destinazione")
@@ -746,7 +1087,7 @@ class EncoderApp:
         enc = self.encoder.get()
         br = self._bitrate()
         if enc == "hw":
-            cmd += ["-c:v", "hevc_videotoolbox", "-profile:v", "main10",
+            cmd += ["-c:v", HW_HEVC, "-profile:v", "main10",
                     "-b:v", f"{br}M", "-pix_fmt", "p010le"]
             tag = "hvc1"
         elif enc == "h264":
@@ -754,11 +1095,16 @@ class EncoderApp:
             if self._h264_software(src):
                 cmd += ["-c:v", "libx264", "-preset", "fast"]
             else:
-                cmd += ["-c:v", "h264_videotoolbox"]
+                cmd += ["-c:v", HW_H264]
             cmd += ["-b:v", f"{br}M", "-maxrate", f"{br}M",
                     "-bufsize", f"{max(50, int(float(br) / 2))}M",
                     "-pix_fmt", "yuv420p", "-g", str(self._keyint(src))]
             tag = "avc1"
+        elif enc == "av1hw":
+            cmd += ["-c:v", HW_AV1, "-preset", "p5", "-tune", "hq",
+                    "-b:v", f"{br}M", "-maxrate", f"{int(float(br) * 1.5)}M",
+                    "-pix_fmt", "p010le", "-g", str(self._keyint(src))]
+            tag = None
         elif enc == "av1":
             # SVT-AV1 accetta solo CRF sopra i 100 Mbps: -b:v 0 disattiva l'ABR.
             cmd += ["-c:v", "libsvtav1", "-preset", self.preset.get(),
@@ -885,7 +1231,8 @@ class EncoderApp:
                 skipped += 1
                 continue
 
-            ok = self._encode(src, dst)
+            later = sum(self.job_pixels(f) or 0 for f in files[idx:])
+            ok = self._encode(src, dst, later)
             if not ok:
                 failed += 1
                 continue
@@ -921,8 +1268,11 @@ class EncoderApp:
                  f"          Libera spazio o scegli un'altra cartella di destinazione.\n")
         return False
 
-    def _encode(self, src, dst):
+    def _encode(self, src, dst, later_px=0):
         dur = ffprobe_duration(src)
+        px_total = self.job_pixels(src)
+        enc, preset = self.encoder.get(), self.preset.get()
+        t0 = time.time()
         self._log_plan(src)
         cmd = self.build_cmd(src, dst)
         self.log("\n┌─ COMANDO FFMPEG ─────────────────────────────────────────\n")
@@ -936,6 +1286,7 @@ class EncoderApp:
             return False
 
         time_re = re.compile(r"time=(\d+):(\d+):(\d+\.\d+)")
+        speed_re = re.compile(r"speed=\s*([\d.]+)x")
         disk_full = False
         aborted = False
         for line in self.proc.stdout:
@@ -946,12 +1297,22 @@ class EncoderApp:
                 self.log("\n[annullato]\n")
                 aborted = True
                 break
+            if self.show_raw.get() and ("frame=" in line or "size=" in line) and "time=" in line:
+                self.log_q.put(("prog", line.strip()))
             m = time_re.search(line)
             if m and dur:
                 h, mn, s = m.groups()
                 t = int(h) * 3600 + int(mn) * 60 + float(s)
                 self._set_progress(min(100, t / dur * 100))
-                self._set_status(f"{t/dur*100:4.0f}%")
+                status = f"{t/dur*100:4.0f}%"
+                sm = speed_re.search(line)
+                if sm and float(sm.group(1)) > 0 and px_total:
+                    x = float(sm.group(1))
+                    left = (dur - t) / x                       # secondi di questo file
+                    if later_px and t > 20:                    # i file dopo, alla velocità osservata
+                        left += later_px / (px_total / dur * x)
+                    status += f" · ancora {fmt_dur(left)}"
+                self._set_status(status)
             elif "frame=" in line or "fps=" in line:
                 pass  # rumore di progress, non lo stampo riga per riga
             else:
@@ -962,6 +1323,10 @@ class EncoderApp:
         self._set_progress(100)
 
         if not aborted and rc == 0 and os.path.exists(dst) and os.path.getsize(dst) > 0:
+            took = time.time() - t0
+            if px_total and took > 60:                       # sotto il minuto la misura non è affidabile
+                save_speed(f"{enc}:{preset}" if enc in ("av1", "sw") else enc, px_total / took / 1e6)
+                self.log(f"[tempo] {fmt_dur(took)} → velocità registrata per le prossime stime\n")
             self.log(f"[OK] {dst}  ({human_gb(os.path.getsize(dst))})\n")
             return True
 
