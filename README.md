@@ -39,6 +39,14 @@ Homebrew con `brew install python-tk`).
   file oltre i 4 GB, più "solo metadati" e "verifica" su MP4 esistenti.
 - **Controllo dello spazio disco** prima di ogni file e pulizia degli output
   troncati.
+- **Analisi e consigli**: appena aggiungi un file la GUI legge formato, fps e
+  colore, stima il tempo di codifica (con le alternative: AV1 preset 10, HEVC
+  hardware) e segnala i settaggi incoerenti — colore HDR/SDR, mono/stereo, CRF
+  verificato per l'8K50/60, metadati spenti, disco troppo pieno — con un
+  pulsante "Applica i consigli". Durante la codifica mostra il tempo
+  rimanente, anche per i file successivi del batch. La velocità reale di ogni
+  encode riuscito viene salvata in `~/.x5_quest_encoder_speeds.json` e rende
+  più precise le stime successive.
 - **Mostra comando**: tutti i comandi ffmpeg/exiftool sono visibili e
   copia-incollabili, per usarli anche senza GUI.
 
